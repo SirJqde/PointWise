@@ -1,4 +1,4 @@
-# GuideCursor 🧭
+# PointWise 🧭
 
 > **Privacy-first, human-in-the-loop cursor co-pilot** — a toggleable browser extension that guides users through complex online tasks by spotlighting the next required step, without ever clicking, typing, or hijacking input.
 
