@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "GuideCursor",
-  "version": "0.1.0",
-  "description": "Privacy-first human-in-the-loop cursor co-pilot. Guides — never automates.",
+  "name": "PointWise",
+  "version": "0.2.0",
+  "description": "AI-powered ghost cursor that highlights the next action on any website. Privacy-first.",
   "permissions": [
     "activeTab",
     "scripting",
@@ -11,13 +11,18 @@
     "webNavigation",
     "offscreen"
   ],
+  "host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
   "action": {
     "default_popup": "popup/popup.html",
     "default_icon": {
       "16": "assets/icons/icon16-blue.png",
       "48": "assets/icons/icon48-blue.png",
       "128": "assets/icons/icon128-blue.png"
-    }
+    },
+    "default_title": "PointWise"
   },
   "background": {
     "service_worker": "service-worker-loader.js",

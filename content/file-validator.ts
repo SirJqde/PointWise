@@ -81,9 +81,10 @@ export async function validateFile(
       if (offerResize) {
         const targetW = constraints.maxWidth ?? dims.width;
         const targetH = constraints.maxHeight ?? dims.height;
-        result.resizedBlob = await resizeImage(file, targetW, targetH);
+        const resized = await resizeImage(file, targetW, targetH);
         // Clear dimension errors if resize succeeded
-        if (result.resizedBlob) {
+        if (resized) {
+          result.resizedBlob = resized;
           result.ok = errors.length === 0;
           return result;
         }

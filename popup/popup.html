@@ -2,60 +2,91 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>GuideCursor</title>
+  <title>PointWise</title>
   <link rel="stylesheet" href="popup.css" />
 </head>
 <body>
 
-  <!-- Header -->
-  <header>
+  <!-- Header: ONLY PointWise + power switch visible initially when OFF -->
+  <header id="app-header">
     <div class="logo-wrap">
-      <span class="logo">🧭</span>
-      <h1>GuideCursor</h1>
+      <span class="logo">⬡</span>
+      <h1>PointWise</h1>
     </div>
     <div class="header-right">
-      <span id="status-indicator" class="status-indicator dormant" title="Dormant"></span>
-      <button id="toggle-btn" class="toggle-btn">Start</button>
+      <span id="status-indicator" class="status-indicator dormant" title="PointWise is Off"></span>
+      <button
+        id="power-switch"
+        class="power-switch"
+        type="button"
+        role="switch"
+        aria-checked="false"
+        aria-label="Toggle PointWise power"
+        title="Turn PointWise ON"
+      >
+        <span class="switch-track">
+          <span class="switch-thumb">
+            <svg class="power-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round">
+              <path d="M12 3v8" />
+              <path d="M18.36 6.64a9 9 0 1 1-12.73 0" />
+            </svg>
+          </span>
+        </span>
+      </button>
     </div>
   </header>
 
-  <!-- Prompt -->
-  <textarea id="task-input" rows="3"
-    placeholder="e.g. Book a bus ticket&#10;Renew driving licence India&#10;File income tax return">
-  </textarea>
+  <!-- Context follow-up panel: opens automatically if initial prompt lacked details -->
+  <section id="context-panel" class="context-panel hidden">
+    <div class="context-badge">NEED MORE CONTEXT</div>
+    <p id="context-question" class="context-question"></p>
+    <textarea
+      id="context-answer"
+      rows="3"
+      placeholder="Add details (e.g. Student pass, Pune to Mumbai on 26 Nov, or product name)…"
+    ></textarea>
+    <div class="action-row">
+      <button id="context-submit-btn" class="search-btn" type="button">Continue ▶</button>
+      <button id="context-skip-btn" class="guide-current-btn" type="button">Skip</button>
+    </div>
+  </section>
 
-  <button id="search-btn" class="search-btn">Search</button>
+  <!-- Active panel: prompt dialogue, search bar & results ONLY open once turned ON -->
+  <section id="active-panel" class="active-panel hidden">
+    <div id="status-bar" class="status-bar">
+      <span class="pulse-dot"></span>
+      <span id="status-text" class="status-text">Ready — enter a task or website</span>
+    </div>
 
-  <!-- Result box — hidden until a site is found -->
-  <div id="result-box" class="result-box hidden">
-    <div class="result-header">
-      <span id="result-badge" class="result-badge">✅ Verified</span>
-      <div class="score-wrap">
-        <div class="score-track"><div id="score-fill" class="score-fill"></div></div>
-        <span id="score-num" class="score-num"></span>
+    <label for="task-input" class="prompt-label">What do you want to do?</label>
+    <textarea
+      id="task-input"
+      rows="3"
+      placeholder="e.g. Apply for a BMTC bus pass&#10;Book a train ticket from Delhi to Agra&#10;Renew driving licence"
+    ></textarea>
+
+    <div class="action-row">
+      <button id="search-btn" class="search-btn" type="button">Search Web</button>
+      <button id="guide-current-btn" class="guide-current-btn" type="button" title="Scan and guide on the currently open tab">
+        Guide Page
+      </button>
+    </div>
+
+    <!-- Keywords extracted pill row -->
+    <div id="keywords-row" class="keywords-row hidden"></div>
+
+    <!-- Google-style search results container -->
+    <div id="results-container" class="results-container hidden"></div>
+
+    <!-- Footer / Gemini API key settings (only shown when ON) -->
+    <footer>
+      <button id="key-btn" class="key-btn" type="button" title="Configure Gemini API key">⚙ API Key</button>
+      <div id="key-row" class="key-row hidden">
+        <input type="password" id="api-key" placeholder="AIzaSy…" autocomplete="off" />
+        <button id="save-key" class="save-key-btn" type="button">Save</button>
       </div>
-    </div>
-    <a id="result-link" class="result-link" href="#" target="_blank" rel="noopener noreferrer">
-      <span id="result-domain"></span>
-      <span class="ext-icon">↗</span>
-    </a>
-    <button id="go-btn" class="go-btn">Open &amp; start guiding</button>
-  </div>
-
-  <!-- Active status -->
-  <div id="status-bar" class="status-bar hidden">
-    <span class="pulse-dot"></span>
-    <span id="status-text" class="status-text">Guiding…</span>
-  </div>
-
-  <!-- Hidden API key gear -->
-  <footer>
-    <button id="key-btn" class="key-btn" title="Gemini API key">⚙</button>
-    <div id="key-row" class="key-row hidden">
-      <input type="password" id="api-key" placeholder="AIzaSy…" autocomplete="off" />
-      <button id="save-key" class="save-key-btn">Save</button>
-    </div>
-  </footer>
+    </footer>
+  </section>
 
   <script src="./popup.ts" type="module"></script>
 </body>

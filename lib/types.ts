@@ -1,5 +1,5 @@
 // ============================================================
-// GuideCursor — Types shared across all modules
+// PointWise — Types shared across all modules
 // ============================================================
 
 export type SensitivityClass = "normal" | "captcha" | "otp" | "payment" | "legal";
@@ -7,6 +7,8 @@ export type SensitivityClass = "normal" | "captcha" | "otp" | "payment" | "legal
 export interface Step {
   /** CSS / ARIA selector pointing to the target element */
   targetSelector: string;
+  /** Optional fallback label/text to locate element if selector shifts */
+  fallbackLabel?: string;
   action: "click" | "focus" | "scroll" | "file-upload" | "pause";
   /** Human-readable hint shown in the dialogue box */
   hint: string;
@@ -18,6 +20,10 @@ export interface Step {
 export interface Plan {
   taskGoal: string;
   steps: Step[];
+  source?: "ai" | "local";
+  warning?: string;
+  needsContext?: boolean;
+  clarifyingQuestion?: string;
 }
 
 export interface SessionNode {
@@ -27,9 +33,48 @@ export interface SessionNode {
   timestamp: number;
 }
 
+export interface VerificationSignal {
+  name: string;
+  passed: boolean;
+  detail: string;
+}
+
+export interface DomainVerificationResult {
+  canonical: string;
+  trustScore: number;   // 0–100 validity score
+  warnings: string[];
+  signals?: VerificationSignal[];
+  label?: string;
+}
+
+export interface SearchResultItem {
+  title: string;
+  url: string;
+  domain: string;
+  snippet: string;
+  matchedKeywords: string[];
+  keywordScore: number;     // 0–100 prompt relevance
+  validityScore: number;    // 0–100 website validity
+  signals: VerificationSignal[];
+  warnings: string[];
+}
+
+export interface WebSearchResponse {
+  query: string;
+  keywords: string[];
+  results: SearchResultItem[];
+  warnings: string[];
+}
+
 export interface SessionGraph {
   id: string;
+  on: boolean;
+  guiding: boolean;
   taskGoal: string;
+  contextProvided?: boolean;
+  contextQuestion?: string;
+  lastQuery?: string;
+  lastResults?: SearchResultItem[];
   nodes: SessionNode[];
   createdAt: number;
 }
@@ -45,24 +90,25 @@ export interface SnapshotElement {
   role: string;
   label: string;
   tagName: string;
+  inputType?: string;
   rect: { x: number; y: number; width: number; height: number };
   visible: boolean;
+  inViewport?: boolean;
   disabled: boolean;
   hasFileInput?: boolean;
 }
 
-export interface DomainVerificationResult {
-  canonical: string;
-  trustScore: number;   // 0–100 (40=TLD, 25=DNS, 20=CT, 15=HSTS)
-  warnings: string[];
-}
-
-// Messages between content script ↔ service worker
+// Messages between popup / content script / service worker
 export type ExtMessage =
-  | { type: "TOGGLE_ON"; taskGoal: string }
+  | { type: "PING" }
+  | { type: "GET_SESSION_STATE" }
+  | { type: "TOGGLE_ON"; taskGoal: string; resetContext?: boolean }
   | { type: "TOGGLE_OFF" }
-  | { type: "SNAPSHOT_READY"; snapshot: ScrubbedSnapshot }
+  | { type: "SNAPSHOT_READY"; snapshot: ScrubbedSnapshot; taskGoal?: string }
+  | { type: "CONTEXT_REQUIRED"; question: string; popupOpened: boolean }
+  | { type: "CONTEXT_SUBMITTED"; answer: string }
   | { type: "PLAN_READY"; plan: Plan }
+  | { type: "PLAN_ERROR"; message: string }
   | { type: "STEP_COMPLETE"; stepIndex: number }
   | { type: "USER_WITHDREW" }
   | { type: "USER_RESUMED" }

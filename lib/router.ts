@@ -1,224 +1,679 @@
 // ============================================================
-// Intent-Driven Base Search Router — v3
+// PointWise — Keyword-Matched Web Search Router
 //
-// Resolution pipeline:
-//   Stage 1 — Static Allowlist (instant, highest trust)
-//   Stage 2 — DuckDuckGo Instant Answer (fallback, any domain)
-//   Stage 3 — Multi-signal verification (DNS + CT + HSTS)
+// Pipeline (NO static website registry):
+//   1. Keyword Matching & Extraction: extracts core nouns,
+//      acronyms, and intent cues from the user's natural prompt.
+//   2. Direct URL/Domain check (if user typed a site directly).
+//   3. Live Web Search: fetches multiple organic web results
+//      (Google-style links with title, URL, and snippet).
+//   4. Parallel Validity Checker: cross-checks each candidate
+//      website (Live HTTPS, DNS, Gov/Authority TLD, TLS/CT, HSTS)
+//      and scores + ranks results by validity & keyword match.
 // ============================================================
 
-import { verifyDomain, type DetailedVerificationResult } from "./verifier.js";
+import {
+  verifyWebsite,
+  type DetailedVerificationResult,
+} from "./verifier.js";
+import type { SearchResultItem, WebSearchResponse } from "./types.js";
 
-export type { DetailedVerificationResult };
+export type { DetailedVerificationResult, SearchResultItem, WebSearchResponse };
 
-// ── Static Allowlist ──────────────────────────────────────────
-// Covers government portals AND official commercial/utility
-// services that citizens commonly need help with.
+// ── Keyword Extraction & Prompt Analysis ──────────────────────
 
-const ALLOWLIST: { keywords: string[]; domain: string; label: string }[] = [
+const FILLER_WORDS = new Set([
+  "a", "an", "the", "to", "for", "my", "on", "in", "of", "and", "or",
+  "with", "from", "by", "at", "into", "is", "are", "how", "can", "i",
+  "want", "need", "please", "me", "help", "find", "get", "open", "show",
+  "website", "site", "web", "page", "portal", "link", "online", "official",
+]);
 
-  // ── India — Government ────────────────────────────────────
-  { keywords: ["income tax", "itr", "file tax return", "tax filing india"], domain: "www.incometax.gov.in", label: "Income Tax Department India" },
-  { keywords: ["passport india", "renew passport india", "apply passport india", "passport seva"], domain: "www.passportindia.gov.in", label: "Passport Seva India" },
-  { keywords: ["pan card", "pan number", "nsdl pan", "apply pan"], domain: "www.onlineservices.nsdl.com", label: "NSDL PAN Services" },
-  { keywords: ["aadhaar", "aadhar update", "uidai", "enroll aadhaar"], domain: "myaadhaar.uidai.gov.in", label: "MyAadhaar (UIDAI)" },
-  { keywords: ["epfo", "pf balance", "provident fund", "employee provident fund", "pf withdrawal"], domain: "www.epfindia.gov.in", label: "EPFO India" },
-  { keywords: ["gst registration", "gst portal india", "gstin", "gst return"], domain: "www.gst.gov.in", label: "GST Portal India" },
-  { keywords: ["voter id", "voter registration india", "election commission india", "eci voter"], domain: "voters.eci.gov.in", label: "Election Commission of India" },
-  { keywords: ["digilocker", "digital locker india", "digital documents india"], domain: "www.digilocker.gov.in", label: "DigiLocker India" },
-  { keywords: ["national scholarship india", "nsp scholarship", "pm scholarship india"], domain: "scholarships.gov.in", label: "National Scholarship Portal" },
-  { keywords: ["pm kisan", "pmkisan", "farmer subsidy india"], domain: "pmkisan.gov.in", label: "PM-KISAN" },
-  { keywords: ["ration card india", "food security india", "nfsa"], domain: "nfsa.gov.in", label: "National Food Security Portal" },
-  { keywords: ["court case status india", "ecourts", "case status high court"], domain: "ecourts.gov.in", label: "eCourts India" },
-  { keywords: ["company registration india", "mca21", "ministry of corporate affairs", "mca portal"], domain: "www.mca.gov.in", label: "Ministry of Corporate Affairs" },
-  { keywords: ["udyam registration", "msme registration india", "udyog aadhar"], domain: "udyamregistration.gov.in", label: "Udyam Registration" },
-  { keywords: ["ayushman bharat", "pmjay", "health card india", "pm jan arogya"], domain: "pmjay.gov.in", label: "Ayushman Bharat PM-JAY" },
-  { keywords: ["jeevan pramaan", "pension certificate india", "life certificate"], domain: "jeevanpramaan.gov.in", label: "Jeevan Pramaan" },
-  { keywords: ["umang app", "umang portal india"], domain: "web.umang.gov.in", label: "UMANG India" },
-  { keywords: ["national portal india", "government services india", "india gov"], domain: "www.india.gov.in", label: "National Portal of India" },
-  { keywords: ["e shram", "eshram card", "unorganised worker india"], domain: "eshram.gov.in", label: "e-Shram Portal" },
-  { keywords: ["pm svamitva", "property card india"], domain: "svamitva.gov.in", label: "SVAMITVA Scheme" },
-  { keywords: ["cowin", "covid vaccine certificate india", "vaccination certificate india"], domain: "www.cowin.gov.in", label: "CoWIN India" },
+const ACTION_VERBS = new Set([
+  "apply", "book", "renew", "file", "pay", "check", "register",
+  "download", "update", "track", "buy", "order", "search", "login",
+  "verify", "cancel", "claim", "enroll", "submit",
+]);
 
-  // ── India — Transport & Travel ────────────────────────────
-  { keywords: ["irctc", "train ticket india", "train booking india", "indian railways ticket", "book train"], domain: "www.irctc.co.in", label: "IRCTC Rail Connect" },
-  { keywords: ["driving licence india", "dl apply india", "sarathi", "vehicle registration india", "parivahan", "rc renewal", "driving license application"], domain: "parivahan.gov.in", label: "Parivahan Sewa (DL/RC)" },
-  { keywords: ["redbus", "book bus india", "bus ticket india", "bus booking india"], domain: "www.redbus.in", label: "RedBus" },
-  { keywords: ["abhibus", "abhi bus"], domain: "www.abhibus.com", label: "AbhiBus" },
-  { keywords: ["ksrtc bus", "ksrtc ticket", "karnataka bus"], domain: "www.ksrtc.in", label: "KSRTC Karnataka" },
-  { keywords: ["apsrtc bus", "andhra pradesh bus", "ap bus ticket"], domain: "www.apsrtconline.in", label: "APSRTC Online" },
-  { keywords: ["msrtc bus", "maharashtra bus", "shivneri bus", "pune bus"], domain: "www.msrtcets.in", label: "MSRTC Maharashtra" },
-  { keywords: ["upsrtc bus", "uttar pradesh bus", "up roadways"], domain: "www.upsrtconline.co.in", label: "UPSRTC UP Roadways" },
-  { keywords: ["hrtc bus", "himachal bus", "hp bus booking"], domain: "www.hrtchp.com", label: "HRTC Himachal Pradesh" },
-  { keywords: ["tsrtc bus", "telangana bus", "ts bus ticket"], domain: "www.tsrtconline.in", label: "TSRTC Telangana" },
-  { keywords: ["tnstc bus", "tamil nadu bus", "setc bus"], domain: "www.tnstc.in", label: "TNSTC Tamil Nadu" },
-  { keywords: ["gsrtc bus", "gujarat bus", "gujarat roadways"], domain: "www.gsrtc.in", label: "GSRTC Gujarat" },
-  { keywords: ["rsrtc bus", "rajasthan bus", "rajasthan roadways"], domain: "www.rsrtc.rajasthan.gov.in", label: "RSRTC Rajasthan" },
-  { keywords: ["dtc bus delhi", "delhi bus pass", "delhi transport"], domain: "www.dtc.delhi.gov.in", label: "DTC Delhi" },
-  { keywords: ["pepsu bus", "punjab bus", "punjab roadways"], domain: "www.prtcpunjab.in", label: "PRTC Punjab" },
-  { keywords: ["fly air india", "air india booking", "air india flight"], domain: "www.airindia.in", label: "Air India" },
-  { keywords: ["indigo flight", "indigo booking", "book indigo"], domain: "www.goindigo.in", label: "IndiGo Airlines" },
-  { keywords: ["spicejet flight", "spicejet booking"], domain: "www.spicejet.com", label: "SpiceJet" },
-  { keywords: ["vistara flight", "vistara booking"], domain: "www.airvistara.com", label: "Vistara Airlines" },
-  { keywords: ["makemytrip flight", "makemytrip hotel", "mmt booking"], domain: "www.makemytrip.com", label: "MakeMyTrip" },
-  { keywords: ["cleartrip booking", "cleartrip flight"], domain: "www.cleartrip.com", label: "Cleartrip" },
-  { keywords: ["ixigo train", "ixigo bus", "ixigo booking"], domain: "www.ixigo.com", label: "ixigo" },
+const GOV_INTENT_PATTERN =
+  /\b(apply|renew|file|pass|licence|license|passport|aadhaar|aadhar|pan|tax|itr|gst|epfo|pf|voter|ration|scholarship|pension|challan|parivahan|sarathi|seva|sindhu|bmtc|ksrtc|irctc|gov|government|municipal|certificate|visa|immigration|dmv|irs|ssa|hmrc|nhs)\b/i;
 
-  // ── India — Banking & Finance ─────────────────────────────
-  { keywords: ["sbi net banking", "sbi online banking", "state bank of india login"], domain: "www.onlinesbi.sbi", label: "SBI Net Banking" },
-  { keywords: ["hdfc net banking", "hdfc bank login", "hdfc netbanking"], domain: "netbanking.hdfcbank.com", label: "HDFC NetBanking" },
-  { keywords: ["icici net banking", "icici bank login", "icici netbanking"], domain: "www.icicibank.com", label: "ICICI Bank" },
-  { keywords: ["axis net banking", "axis bank login", "axis netbanking"], domain: "www.axisbank.com", label: "Axis Bank" },
-  { keywords: ["paytm payment", "paytm wallet", "paytm upi"], domain: "paytm.com", label: "Paytm" },
-  { keywords: ["phonepe payment", "phonepe upi"], domain: "www.phonepe.com", label: "PhonePe" },
-  { keywords: ["google pay india", "gpay upi"], domain: "pay.google.com", label: "Google Pay India" },
-
-  // ── India — Utilities & Services ─────────────────────────
-  { keywords: ["gas booking india", "hp gas", "indane gas", "bharat gas", "lpg refill india"], domain: "www.mylpg.in", label: "MyLPG Portal (HP/Indane/Bharat Gas)" },
-  { keywords: ["electricity bill india", "power bill india", "bses bill", "bescom bill", "discom bill"], domain: "www.payurban.in", label: "PayUrban (Electricity Bills)" },
-  { keywords: ["water bill india", "municipal water bill"], domain: "www.payurban.in", label: "PayUrban (Municipal Bills)" },
-  { keywords: ["amazon india", "amazon.in shopping", "amazon india order"], domain: "www.amazon.in", label: "Amazon India" },
-  { keywords: ["flipkart", "flipkart shopping", "flipkart order"], domain: "www.flipkart.com", label: "Flipkart" },
-  { keywords: ["meesho", "meesho order"], domain: "www.meesho.com", label: "Meesho" },
-  { keywords: ["naukri job", "naukri apply", "find job india"], domain: "www.naukri.com", label: "Naukri.com" },
-  { keywords: ["linkedin job", "linkedin apply india"], domain: "www.linkedin.com", label: "LinkedIn" },
-  { keywords: ["swiggy order food", "swiggy delivery"], domain: "www.swiggy.com", label: "Swiggy" },
-  { keywords: ["zomato order food", "zomato delivery"], domain: "www.zomato.com", label: "Zomato" },
-  { keywords: ["bigbasket grocery", "bigbasket order"], domain: "www.bigbasket.com", label: "BigBasket" },
-
-  // ── USA ───────────────────────────────────────────────────
-  { keywords: ["social security usa", "ssa benefits", "social security card usa"], domain: "www.ssa.gov", label: "Social Security Administration" },
-  { keywords: ["us passport", "renew passport usa", "passport application usa"], domain: "travel.state.gov", label: "US State Dept Travel (Passport)" },
-  { keywords: ["irs tax", "file federal taxes usa", "us tax return", "irs.gov"], domain: "www.irs.gov", label: "IRS (US Tax)" },
-  { keywords: ["fafsa", "federal student aid usa", "student loan usa"], domain: "studentaid.gov", label: "Federal Student Aid (FAFSA)" },
-  { keywords: ["usa jobs", "usajobs", "federal job application usa"], domain: "www.usajobs.gov", label: "USAJobs" },
-  { keywords: ["medicare usa", "medicaid usa"], domain: "www.medicare.gov", label: "Medicare.gov" },
-  { keywords: ["green card", "immigration usa", "uscis", "visa usa"], domain: "www.uscis.gov", label: "USCIS Immigration" },
-  { keywords: ["veterans benefits usa", "va benefits", "gi bill"], domain: "www.va.gov", label: "US Department of Veterans Affairs" },
-  { keywords: ["food stamps usa", "snap benefits usa"], domain: "www.fns.usda.gov/snap", label: "SNAP (Food Stamps)" },
-  { keywords: ["vote usa", "voter registration usa"], domain: "vote.gov", label: "Vote.gov" },
-  { keywords: ["greyhound bus usa", "greyhound ticket"], domain: "www.greyhound.com", label: "Greyhound Bus (USA)" },
-  { keywords: ["amtrak train usa", "amtrak ticket"], domain: "www.amtrak.com", label: "Amtrak (USA Trains)" },
-  { keywords: ["flixbus usa", "flixbus booking"], domain: "www.flixbus.com", label: "FlixBus USA" },
-  { keywords: ["dmv appointment usa", "driver license usa", "vehicle registration usa"], domain: "www.usa.gov/motor-vehicle-services", label: "USA.gov DMV Guide" },
-
-  // ── UK ────────────────────────────────────────────────────
-  { keywords: ["uk passport", "renew passport uk", "hmpo"], domain: "www.gov.uk/apply-renew-passport", label: "HMPO UK Passport" },
-  { keywords: ["universal credit uk", "benefits uk", "dwp uk"], domain: "www.gov.uk/universal-credit", label: "Universal Credit (UK)" },
-  { keywords: ["self assessment uk", "hmrc tax uk", "uk tax return", "national insurance uk"], domain: "www.gov.uk/self-assessment-tax-returns", label: "HMRC Self Assessment (UK)" },
-  { keywords: ["driving licence uk", "dvla uk", "vehicle tax uk"], domain: "www.gov.uk/browse/driving", label: "DVLA / Driving (UK)" },
-  { keywords: ["uk visa", "settle in uk", "immigration uk"], domain: "www.gov.uk/browse/visas-immigration", label: "UK Visas & Immigration" },
-  { keywords: ["nhs uk", "book gp uk", "nhs appointment uk"], domain: "www.nhs.uk", label: "NHS UK" },
-  { keywords: ["national express bus uk", "national express ticket"], domain: "www.nationalexpress.com", label: "National Express UK" },
-  { keywords: ["megabus uk", "megabus booking"], domain: "uk.megabus.com", label: "Megabus UK" },
-  { keywords: ["trainline uk", "train ticket uk", "book train uk"], domain: "www.thetrainline.com", label: "Trainline UK" },
-
-  // ── Australia ─────────────────────────────────────────────
-  { keywords: ["centrelink australia", "mygov australia"], domain: "www.centrelink.gov.au", label: "Centrelink (Australia)" },
-  { keywords: ["tax return australia", "ato australia", "australian taxation"], domain: "www.ato.gov.au", label: "Australian Taxation Office" },
-  { keywords: ["passport australia", "australian passport"], domain: "www.passports.gov.au", label: "Australian Passports" },
-  { keywords: ["visa australia", "immigration australia", "home affairs australia"], domain: "immi.homeaffairs.gov.au", label: "Australian Home Affairs (Visa)" },
-  { keywords: ["greyhound australia bus", "australia bus booking"], domain: "www.greyhound.com.au", label: "Greyhound Australia" },
-
-  // ── Canada ────────────────────────────────────────────────
-  { keywords: ["cra tax canada", "income tax canada", "tax return canada"], domain: "www.canada.ca/en/revenue-agency.html", label: "CRA (Canada Revenue Agency)" },
-  { keywords: ["passport canada", "canadian passport"], domain: "www.canada.ca/en/immigration-refugees-citizenship/services/canadian-passports.html", label: "Passport Canada" },
-  { keywords: ["immigration canada", "express entry canada", "ircc canada"], domain: "www.canada.ca/en/immigration-refugees-citizenship.html", label: "IRCC (Canada Immigration)" },
-  { keywords: ["flixbus canada", "greyhound canada bus"], domain: "www.flixbus.ca", label: "FlixBus Canada" },
-
-  // ── Singapore ─────────────────────────────────────────────
-  { keywords: ["singpass singapore", "singpass login"], domain: "www.singpass.gov.sg", label: "SingPass Singapore" },
-  { keywords: ["cpf singapore", "central provident fund singapore"], domain: "www.cpf.gov.sg", label: "CPF Board Singapore" },
-  { keywords: ["iras singapore", "income tax singapore"], domain: "www.iras.gov.sg", label: "IRAS (Singapore Tax)" },
-  { keywords: ["mom singapore", "work pass singapore"], domain: "www.mom.gov.sg", label: "MOM Singapore" },
-  { keywords: ["hdb flat singapore", "hdb portal"], domain: "www.hdb.gov.sg", label: "HDB Singapore" },
-];
-
-// ── DDG Fallback Search ───────────────────────────────────────
-
-const DDG_API = "https://api.duckduckgo.com/";
-
-interface DDGResponse {
-  AbstractURL?: string;
-  Results?: { FirstURL?: string }[];
-  RelatedTopics?: { FirstURL?: string }[];
+export interface PromptAnalysis {
+  raw: string;
+  keywords: string[];
+  actionWords: string[];
+  searchQuery: string;
+  hasGovIntent: boolean;
 }
 
-/** Heuristics for a plausible official/utility domain from DDG results */
-function isPlausibleServiceDomain(url: string): boolean {
+/**
+ * Extracts meaningful keywords and builds a clean search query
+ * from natural-language prompts like "apply for a bmtc bus pass".
+ */
+export function analyzePromptKeywords(prompt: string): PromptAnalysis {
+  const raw = prompt.trim();
+  const tokens = raw
+    .toLowerCase()
+    .replace(/[^\w\s.-]/g, " ")
+    .split(/\s+/)
+    .filter(Boolean);
+
+  const keywords: string[] = [];
+  const actionWords: string[] = [];
+  const queryTokens: string[] = [];
+
+  for (const tok of tokens) {
+    if (FILLER_WORDS.has(tok)) continue;
+    if (ACTION_VERBS.has(tok)) {
+      if (!actionWords.includes(tok)) actionWords.push(tok);
+      queryTokens.push(tok);
+      continue;
+    }
+    if (tok.length >= 2) {
+      if (!keywords.includes(tok)) keywords.push(tok);
+      queryTokens.push(tok);
+    }
+  }
+
+  // Ensure query isn't empty if prompt only had short words
+  const searchQuery =
+    queryTokens.length > 0 ? queryTokens.join(" ") : raw;
+
+  return {
+    raw,
+    keywords,
+    actionWords,
+    searchQuery,
+    hasGovIntent: GOV_INTENT_PATTERN.test(raw),
+  };
+}
+
+/**
+ * Scores a search result against extracted prompt keywords across
+ * hostname, path, title, and snippet.
+ */
+export function scoreKeywordRelevance(
+  candidate: { url: string; title: string; snippet: string },
+  analysis: PromptAnalysis
+): { keywordScore: number; matchedKeywords: string[] } {
+  const allTerms = [...analysis.keywords, ...analysis.actionWords];
+  if (allTerms.length === 0) return { keywordScore: 50, matchedKeywords: [] };
+
+  let host = "";
+  let path = "";
   try {
-    const h = new URL(url).hostname;
-    // Accept any resolvable domain except DDG's own pages
-    return !h.includes("duckduckgo.com") && h.includes(".");
+    const u = new URL(candidate.url);
+    host = u.hostname.toLowerCase();
+    path = u.pathname.toLowerCase();
+  } catch {
+    host = candidate.url.toLowerCase();
+  }
+
+  const titleLow = candidate.title.toLowerCase();
+  const snippetLow = candidate.snippet.toLowerCase();
+  const matchedKeywords: string[] = [];
+  let earned = 0;
+  let possible = 0;
+
+  for (const kw of analysis.keywords) {
+    possible += 10;
+    let pts = 0;
+    if (host.includes(kw)) pts += 5;
+    if (path.includes(kw)) pts += 2;
+    if (titleLow.includes(kw)) pts += 3;
+    if (snippetLow.includes(kw)) pts += 1;
+    if (pts > 0) matchedKeywords.push(kw);
+    earned += Math.min(10, pts);
+  }
+
+  for (const act of analysis.actionWords) {
+    possible += 4;
+    if (titleLow.includes(act) || path.includes(act) || snippetLow.includes(act)) {
+      earned += 4;
+      if (!matchedKeywords.includes(act)) matchedKeywords.push(act);
+    }
+  }
+
+  // Extra boost for concatenated keywords in URLs (e.g. "buspass" matching ["bus", "pass"])
+  if (analysis.keywords.length >= 2) {
+    const joined = analysis.keywords.join("");
+    const lastTwo = analysis.keywords.slice(-2).join("");
+    if (
+      host.includes(joined) ||
+      path.includes(joined) ||
+      host.includes(lastTwo) ||
+      path.includes(lastTwo)
+    ) {
+      earned += 4;
+    }
+  }
+
+  const keywordScore =
+    possible > 0 ? Math.min(100, Math.round((earned / possible) * 100)) : 50;
+
+  return { keywordScore, matchedKeywords };
+}
+
+// ── Raw Candidate Extraction ──────────────────────────────────
+
+export interface RawSearchCandidate {
+  title: string;
+  url: string;
+  snippet: string;
+}
+
+const SEARCH_ENGINE_HOSTS = [
+  "yahoo.com",
+  "bing.com",
+  "google.com",
+  "duckduckgo.com",
+  "gstatic.com",
+  "yimg.com",
+  "microsoft.com/en-us/bing",
+];
+
+function isValidResultUrl(rawUrl: string): boolean {
+  try {
+    const u = new URL(rawUrl);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return false;
+    const h = u.hostname.toLowerCase();
+    if (!h.includes(".")) return false;
+    return !SEARCH_ENGINE_HOSTS.some((se) => h === se || h.endsWith(`.${se}`));
   } catch {
     return false;
   }
 }
 
-async function searchDDG(query: string): Promise<string | null> {
+function decodeHtmlEntities(text: string): string {
+  return text
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&apos;|&#x27;/gi, "'")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&#(\d+);/g, (_m, code) => String.fromCharCode(Number(code)))
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function extractYahooRedirectUrl(href: string): string {
+  const ruMatch = href.match(/\/RU=([^/]+)\//);
+  if (ruMatch?.[1]) {
+    try {
+      return decodeURIComponent(ruMatch[1]);
+    } catch {
+      return href;
+    }
+  }
+  return href;
+}
+
+export function parseYahooSearchHtml(html: string): RawSearchCandidate[] {
+  const results: RawSearchCandidate[] = [];
+  const blockRegex =
+    /<div[^>]*class="[^"]*compTitle[^"]*"[^>]*>([\s\S]*?)<\/div>\s*(?:<div[^>]*class="[^"]*compText[^"]*"[^>]*>([\s\S]*?)<\/div>)?/gi;
+
+  let match: RegExpExecArray | null;
+  while ((match = blockRegex.exec(html)) !== null) {
+    const titleBlock = match[1] ?? "";
+    const snippetBlock = match[2] ?? "";
+
+    const anchorMatch = titleBlock.match(
+      /<a[^>]*data-matarget="algo"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i
+    ) ?? titleBlock.match(/<a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i);
+
+    if (!anchorMatch?.[1]) continue;
+
+    const rawHref = anchorMatch[1].replace(/&amp;/g, "&");
+    const targetUrl = extractYahooRedirectUrl(rawHref);
+    if (!isValidResultUrl(targetUrl)) continue;
+
+    const anchorInner = anchorMatch[2] ?? "";
+    const h3Match = anchorInner.match(/<h3[^>]*>([\s\S]*?)<\/h3>/i);
+    const title = decodeHtmlEntities(h3Match?.[1] ?? anchorInner);
+    const snippet = decodeHtmlEntities(snippetBlock);
+
+    if (!title) continue;
+    results.push({ title, url: targetUrl, snippet });
+  }
+
+  return results;
+}
+
+function decodeBingClickUrl(href: string): string {
+  try {
+    const u = new URL(href);
+    if (u.hostname.endsWith("bing.com") && u.pathname.startsWith("/ck/a")) {
+      const encoded = u.searchParams.get("u");
+      if (encoded && encoded.startsWith("a1")) {
+        const b64 = encoded
+          .slice(2)
+          .replace(/-/g, "+")
+          .replace(/_/g, "/");
+        const padded = b64 + "=".repeat((4 - (b64.length % 4)) % 4);
+        return atob(padded);
+      }
+    }
+  } catch {
+    // Return original href on parse failure
+  }
+  return href;
+}
+
+export function parseBingSearchHtml(html: string): RawSearchCandidate[] {
+  const results: RawSearchCandidate[] = [];
+  const itemRegex = /<li[^>]*class="[^"]*\bb_algo\b[^"]*"[^>]*>([\s\S]*?)<\/li>/gi;
+
+  let match: RegExpExecArray | null;
+  while ((match = itemRegex.exec(html)) !== null) {
+    const block = match[1] ?? "";
+    const h2Link = block.match(/<h2[^>]*>\s*<a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i);
+    const tilkLink = block.match(/<a[^>]*class="[^"]*tilk[^"]*"[^>]*href="([^"]+)"/i);
+
+    const rawHref = (h2Link?.[1] ?? tilkLink?.[1] ?? "").replace(/&amp;/g, "&");
+    if (!rawHref) continue;
+
+    const targetUrl = decodeBingClickUrl(rawHref);
+    if (!isValidResultUrl(targetUrl)) continue;
+
+    const title = decodeHtmlEntities(h2Link?.[2] ?? targetUrl);
+    const pMatch = block.match(/<p[^>]*>([\s\S]*?)<\/p>/i);
+    const snippet = decodeHtmlEntities(pMatch?.[1] ?? "");
+
+    results.push({ title, url: targetUrl, snippet });
+  }
+
+  return results;
+}
+
+export function parseDDGHtml(html: string): RawSearchCandidate[] {
+  const results: RawSearchCandidate[] = [];
+  const linkRegex =
+    /<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+  const snippetRegex =
+    /<a[^>]*class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/a>/gi;
+
+  const snippets: string[] = [];
+  let sMatch: RegExpExecArray | null;
+  while ((sMatch = snippetRegex.exec(html)) !== null) {
+    snippets.push(decodeHtmlEntities(sMatch[1] ?? ""));
+  }
+
+  let lMatch: RegExpExecArray | null;
+  let idx = 0;
+  while ((lMatch = linkRegex.exec(html)) !== null) {
+    let href = (lMatch[1] ?? "").replace(/&amp;/g, "&");
+    if (href.startsWith("//")) href = `https:${href}`;
+    try {
+      const parsed = new URL(href, "https://duckduckgo.com");
+      const uddg = parsed.searchParams.get("uddg");
+      if (uddg) href = uddg;
+    } catch {
+      // ignore
+    }
+
+    const title = decodeHtmlEntities(lMatch[2] ?? "");
+    const snippet = snippets[idx] ?? "";
+    idx++;
+
+    if (!isValidResultUrl(href) || !title) continue;
+    results.push({ title, url: href, snippet });
+  }
+
+  return results;
+}
+
+// ── Live Web Search Providers ─────────────────────────────────
+
+async function fetchYahooResults(query: string): Promise<RawSearchCandidate[]> {
+  try {
+    const url = `https://search.yahoo.com/search?p=${encodeURIComponent(query)}`;
+    const res = await fetch(url, {
+      signal: AbortSignal.timeout(6000),
+      headers: { Accept: "text/html,application/xhtml+xml" },
+    });
+    if (!res.ok) return [];
+    const html = await res.text();
+    return parseYahooSearchHtml(html);
+  } catch {
+    return [];
+  }
+}
+
+async function fetchBingResults(query: string): Promise<RawSearchCandidate[]> {
+  try {
+    const url = `https://www.bing.com/search?q=${encodeURIComponent(query)}`;
+    const res = await fetch(url, {
+      signal: AbortSignal.timeout(6000),
+      headers: { Accept: "text/html,application/xhtml+xml" },
+    });
+    if (!res.ok) return [];
+    const html = await res.text();
+    return parseBingSearchHtml(html);
+  } catch {
+    return [];
+  }
+}
+
+async function fetchDDGHtmlResults(query: string): Promise<RawSearchCandidate[]> {
+  try {
+    const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+    const res = await fetch(url, {
+      signal: AbortSignal.timeout(6000),
+      headers: { Accept: "text/html,application/xhtml+xml" },
+    });
+    if (!res.ok) return [];
+    const html = await res.text();
+    return parseDDGHtml(html);
+  } catch {
+    return [];
+  }
+}
+
+interface DDGInstantResponse {
+  AbstractText?: string;
+  AbstractURL?: string;
+  Heading?: string;
+  Results?: { FirstURL?: string; Text?: string }[];
+  RelatedTopics?: { FirstURL?: string; Text?: string; Topics?: { FirstURL?: string; Text?: string }[] }[];
+}
+
+async function fetchDDGInstantResults(query: string): Promise<RawSearchCandidate[]> {
   try {
     const params = new URLSearchParams({
-      q: `${query} official site`,
+      q: query,
       format: "json",
       no_html: "1",
       skip_disambig: "1",
       no_redirect: "1",
-      t: "guidecursor",
+      t: "pointwise",
     });
-    const res = await fetch(`${DDG_API}?${params}`, { signal: AbortSignal.timeout(6000) });
-    if (!res.ok) return null;
+    const res = await fetch(`https://api.duckduckgo.com/?${params}`, {
+      signal: AbortSignal.timeout(4000),
+    });
+    if (!res.ok) return [];
+    const data = (await res.json()) as DDGInstantResponse;
+    const out: RawSearchCandidate[] = [];
 
-    const data = (await res.json()) as DDGResponse;
-
-    // AbstractURL is typically the official website of the entity
-    if (data.AbstractURL && isPlausibleServiceDomain(data.AbstractURL)) {
-      return new URL(data.AbstractURL).hostname;
+    if (data.AbstractURL && isValidResultUrl(data.AbstractURL)) {
+      out.push({
+        title: data.Heading || new URL(data.AbstractURL).hostname,
+        url: data.AbstractURL,
+        snippet: data.AbstractText || "",
+      });
     }
     for (const r of data.Results ?? []) {
-      if (r.FirstURL && isPlausibleServiceDomain(r.FirstURL)) {
-        return new URL(r.FirstURL).hostname;
+      if (r.FirstURL && isValidResultUrl(r.FirstURL)) {
+        out.push({
+          title: r.Text || new URL(r.FirstURL).hostname,
+          url: r.FirstURL,
+          snippet: r.Text || "",
+        });
       }
     }
-    return null;
+    for (const t of data.RelatedTopics ?? []) {
+      if (t.FirstURL && isValidResultUrl(t.FirstURL)) {
+        out.push({
+          title: t.Text || new URL(t.FirstURL).hostname,
+          url: t.FirstURL,
+          snippet: t.Text || "",
+        });
+      }
+      for (const sub of t.Topics ?? []) {
+        if (sub.FirstURL && isValidResultUrl(sub.FirstURL)) {
+          out.push({
+            title: sub.Text || new URL(sub.FirstURL).hostname,
+            url: sub.FirstURL,
+            snippet: sub.Text || "",
+          });
+        }
+      }
+    }
+    return out;
   } catch {
-    return null;
+    return [];
+  }
+}
+
+async function fetchGeminiGroundedResults(query: string): Promise<RawSearchCandidate[]> {
+  if (typeof chrome === "undefined" || !chrome.storage?.local) return [];
+  const apiKey = await new Promise<string>((resolve) => {
+    chrome.storage.local.get("gc_api_key", (r) => {
+      resolve(((r["gc_api_key"] as string) ?? "").trim());
+    });
+  });
+  if (!apiKey) return [];
+
+  try {
+    const endpoint =
+      "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent";
+    const res = await fetch(`${endpoint}?key=${encodeURIComponent(apiKey)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [
+          {
+            parts: [
+              {
+                text: `Find the official websites for: "${query}". List the top official portals and helpful pages.`,
+              },
+            ],
+          },
+        ],
+        tools: [{ google_search: {} }],
+      }),
+      signal: AbortSignal.timeout(7000),
+    });
+    if (!res.ok) return [];
+    const json = (await res.json()) as {
+      candidates?: {
+        groundingMetadata?: {
+          groundingChunks?: { web?: { uri?: string; title?: string } }[];
+        };
+      }[];
+    };
+    const chunks = json.candidates?.[0]?.groundingMetadata?.groundingChunks ?? [];
+    const out: RawSearchCandidate[] = [];
+    for (const c of chunks) {
+      const uri = c.web?.uri;
+      const title = c.web?.title;
+      if (uri && isValidResultUrl(uri)) {
+        out.push({
+          title: title || new URL(uri).hostname,
+          url: uri,
+          snippet: "Found via Google Search grounding",
+        });
+      }
+    }
+    return out;
+  } catch {
+    return [];
   }
 }
 
 // ── Helpers ───────────────────────────────────────────────────
 
-function findAllowListMatch(query: string): { domain: string; label: string } | null {
-  const q = query.toLowerCase();
-  for (const entry of ALLOWLIST) {
-    if (entry.keywords.some((kw) => q.includes(kw))) {
-      return { domain: entry.domain, label: entry.label };
+function extractDirectUrl(query: string): string | null {
+  const trimmed = query.trim();
+  if (!trimmed || /\s/.test(trimmed)) return null;
+  const candidate = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+  try {
+    const parsed = new URL(candidate);
+    if (parsed.hostname.includes(".") && parsed.hostname.length >= 4) {
+      return parsed.href.replace(/\/$/, "");
     }
+  } catch {
+    return null;
   }
   return null;
 }
 
-// ── Public API ────────────────────────────────────────────────
+function deduplicateCandidates(
+  rawList: RawSearchCandidate[]
+): RawSearchCandidate[] {
+  const seenUrls = new Set<string>();
+  const domainCounts = new Map<string, number>();
+  const deduped: RawSearchCandidate[] = [];
 
-export async function resolveIntent(taskDescription: string): Promise<DetailedVerificationResult> {
-  const q = taskDescription.toLowerCase().trim();
+  for (const item of rawList) {
+    try {
+      const u = new URL(item.url);
+      const normUrl = `${u.origin}${u.pathname.replace(/\/$/, "")}${u.search}`;
+      const host = u.hostname.toLowerCase();
 
-  // Stage 1: Static allowlist
-  const match = findAllowListMatch(q);
-  if (match) {
-    const verified = await verifyDomain(match.domain);
-    return { ...verified, trustScore: Math.max(verified.trustScore, 70) };
+      if (seenUrls.has(normUrl)) continue;
+      // Limit to max 1 result per exact hostname so user sees diverse websites
+      const count = domainCounts.get(host) ?? 0;
+      if (count >= 1) continue;
+
+      seenUrls.add(normUrl);
+      domainCounts.set(host, count + 1);
+      deduped.push(item);
+    } catch {
+      continue;
+    }
   }
+  return deduped;
+}
 
-  // Stage 2: DDG fallback
-  const ddgDomain = await searchDDG(q);
-  if (ddgDomain) {
-    const verified = await verifyDomain(ddgDomain);
+// ── Public Multi-Result Search API ────────────────────────────
+
+const MAX_RESULTS = 5;
+
+export async function searchWebIntent(
+  taskDescription: string
+): Promise<WebSearchResponse> {
+  const analysis = analyzePromptKeywords(taskDescription);
+  if (!analysis.raw) {
     return {
-      ...verified,
-      warnings: ["Found via web search — not in verified registry. Review carefully.", ...verified.warnings],
+      query: "",
+      keywords: [],
+      results: [],
+      warnings: ["Enter a prompt or website name to search."],
     };
   }
 
-  // Nothing found
-  return { canonical: "", trustScore: 0, warnings: ["No verified site found. Please navigate manually."], signals: [] };
+  const candidates: RawSearchCandidate[] = [];
+
+  // Direct domain/URL check (if user entered something like "mybmtc.karnataka.gov.in")
+  const directUrl = extractDirectUrl(analysis.raw);
+  if (directUrl) {
+    candidates.push({
+      title: new URL(directUrl).hostname,
+      url: directUrl,
+      snippet: "Direct URL entered by user",
+    });
+  }
+
+  // Live web search: query Yahoo first, then Bing / DDG HTML / DDG Instant / Gemini Search
+  if (!directUrl) {
+    let raw = await fetchYahooResults(analysis.searchQuery);
+
+    if (raw.length < 2) {
+      const [bing, ddgHtml] = await Promise.all([
+        fetchBingResults(analysis.searchQuery),
+        fetchDDGHtmlResults(analysis.searchQuery),
+      ]);
+      raw = [...raw, ...bing, ...ddgHtml];
+    }
+
+    if (raw.length === 0) {
+      const [ddgApi, gemini] = await Promise.all([
+        fetchDDGInstantResults(analysis.searchQuery),
+        fetchGeminiGroundedResults(analysis.searchQuery),
+      ]);
+      raw = [...ddgApi, ...gemini];
+    }
+
+    candidates.push(...raw);
+  }
+
+  const unique = deduplicateCandidates(candidates);
+  if (unique.length === 0) {
+    return {
+      query: analysis.searchQuery,
+      keywords: [...analysis.keywords, ...analysis.actionWords],
+      results: [],
+      warnings: [
+        "No web results returned. Try adding specific keywords or typing a website domain.",
+      ],
+    };
+  }
+
+  // Score by prompt keywords first, pick top candidates, then run parallel Validity Checks
+  const scored = unique
+    .map((item) => ({
+      item,
+      ...scoreKeywordRelevance(item, analysis),
+    }))
+    .sort((a, b) => b.keywordScore - a.keywordScore)
+    .slice(0, MAX_RESULTS);
+
+  const verifiedResults: SearchResultItem[] = await Promise.all(
+    scored.map(async ({ item, keywordScore, matchedKeywords }) => {
+      const v = await verifyWebsite(item.url, {
+        queryKeywords: analysis.keywords,
+        hasGovIntent: analysis.hasGovIntent,
+      });
+
+      const host = (() => {
+        try {
+          return new URL(item.url).hostname;
+        } catch {
+          return item.url;
+        }
+      })();
+
+      return {
+        title: item.title,
+        url: item.url,
+        domain: host,
+        snippet: item.snippet,
+        matchedKeywords,
+        keywordScore,
+        validityScore: v.trustScore,
+        signals: v.signals,
+        warnings: v.warnings,
+      };
+    })
+  );
+
+  // Rank primarily by validity score + keyword match so official valid portals surface first
+  verifiedResults.sort((a, b) => {
+    const rankA = a.validityScore * 0.65 + a.keywordScore * 0.35;
+    const rankB = b.validityScore * 0.65 + b.keywordScore * 0.35;
+    return rankB - rankA;
+  });
+
+  return {
+    query: analysis.searchQuery,
+    keywords: [...analysis.keywords, ...analysis.actionWords],
+    results: verifiedResults,
+    warnings: [],
+  };
+}
+
+/** Backwards-compatible single-result resolver returning the top validated website */
+export async function resolveIntent(
+  taskDescription: string
+): Promise<DetailedVerificationResult> {
+  const response = await searchWebIntent(taskDescription);
+  const top = response.results[0];
+  if (!top) {
+    return {
+      canonical: "",
+      trustScore: 0,
+      warnings: response.warnings,
+      signals: [],
+    };
+  }
+  return {
+    canonical: top.url,
+    trustScore: top.validityScore,
+    warnings: top.warnings,
+    signals: top.signals,
+    label: top.title,
+  };
 }

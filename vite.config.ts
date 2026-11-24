@@ -11,6 +11,14 @@ export default defineConfig({
         sandbox: "sandbox/sandbox.html",
         content: "content/content-main.ts",
       },
+      output: {
+        entryFileNames: (chunkInfo) => {
+          if (chunkInfo.name === "content") {
+            return "content/content-main.js";
+          }
+          return "assets/[name]-[hash].js";
+        },
+      },
     },
   },
 });
