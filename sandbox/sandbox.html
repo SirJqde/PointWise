@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<!--
+  Isolated sandbox iframe — runs with no access to any real page DOM.
+  Communicates with the service worker via postMessage only.
+  This is where AI model calls happen with the scrubbed snapshot.
+-->
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; script-src 'self'; connect-src https://generativelanguage.googleapis.com;">
+</head>
+<body>
+  <script type="module" src="./sandbox.ts"></script>
+</body>
+</html>

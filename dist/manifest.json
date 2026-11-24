@@ -1,0 +1,48 @@
+{
+  "manifest_version": 3,
+  "name": "GuideCursor",
+  "version": "0.1.0",
+  "description": "Privacy-first human-in-the-loop cursor co-pilot. Guides — never automates.",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage",
+    "declarativeNetRequest",
+    "webNavigation",
+    "offscreen"
+  ],
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_icon": {
+      "16": "assets/icons/icon16-blue.png",
+      "48": "assets/icons/icon48-blue.png",
+      "128": "assets/icons/icon128-blue.png"
+    }
+  },
+  "background": {
+    "service_worker": "service-worker-loader.js",
+    "type": "module"
+  },
+  "content_scripts": [],
+  "sandbox": {
+    "pages": [
+      "sandbox/sandbox.html"
+    ]
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'none'",
+    "sandbox": "sandbox allow-scripts; script-src 'self'; object-src 'none'"
+  },
+  "web_accessible_resources": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "resources": [
+        "sandbox/sandbox.html",
+        "assets/cursor.svg"
+      ],
+      "use_dynamic_url": false
+    }
+  ]
+}
