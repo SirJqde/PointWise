@@ -30,7 +30,6 @@ const contextAnswer    = q("context-answer") as HTMLTextAreaElement;
 const contextSubmitBtn = q("context-submit-btn") as HTMLButtonElement;
 const contextSkipBtn   = q("context-skip-btn") as HTMLButtonElement;
 const activePanel      = q("active-panel");
-const statusText       = q("status-text");
 const taskInput        = q("task-input") as HTMLTextAreaElement;
 const searchBtn        = q("search-btn") as HTMLButtonElement;
 const resultsContainer = q("results-container");
@@ -70,10 +69,7 @@ async function restoreSession(): Promise<void> {
       return;
     }
 
-    const label = session.guiding
-      ? `Guiding: ${(session.taskGoal || "Active site").slice(0, 34)}`
-      : "Active — enter a task or website";
-    renderOnState(label, false);
+    renderOnState(false);
   } else {
     isOn = false;
     renderOffState();
@@ -96,12 +92,7 @@ async function turnOn(): Promise<void> {
   await setPowerOn(existingTask, false);
   await setActionIcon("green");
 
-  renderOnState(
-    existingTask
-      ? `Active — ready for "${existingTask.slice(0, 26)}"`
-      : "Active — enter a task or website",
-    true
-  );
+  renderOnState(true);
 }
 
 async function turnOff(): Promise<void> {
@@ -121,7 +112,7 @@ async function turnOff(): Promise<void> {
 
 // ── UI State Renderers ────────────────────────────────────────
 
-function renderOnState(statusMsg: string, focusInput: boolean): void {
+function renderOnState(focusInput: boolean): void {
   powerSwitch.classList.add("on");
   powerSwitch.setAttribute("aria-checked", "true");
   powerSwitch.title = "Turn PointWise OFF";
@@ -132,7 +123,6 @@ function renderOnState(statusMsg: string, focusInput: boolean): void {
   appHeader.classList.add("expanded");
   contextPanel.classList.add("hidden");
   activePanel.classList.remove("hidden");
-  statusText.textContent = statusMsg;
 
   if (focusInput) {
     taskInput.focus();
@@ -219,7 +209,6 @@ async function doSearch(): Promise<void> {
 
   searchBtn.disabled = true;
   searchBtn.textContent = "Searching…";
-  statusText.textContent = "Searching & checking website validity…";
 
   const response = await searchWebIntent(task);
 
@@ -233,12 +222,10 @@ async function doSearch(): Promise<void> {
       response.warnings[0] ??
         "No results found. Try clearer keywords or a website domain."
     );
-    statusText.textContent = "No results matched";
     return;
   }
 
   renderResults(response.results);
-  statusText.textContent = `Click a link to open & guide`;
 }
 
 function renderNoResults(msg: string): void {
