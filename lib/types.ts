@@ -20,10 +20,9 @@ export interface Step {
 export interface Plan {
   taskGoal: string;
   steps: Step[];
-  source?: "ai" | "local";
-  warning?: string;
   needsContext?: boolean;
   clarifyingQuestion?: string;
+  error?: string;
 }
 
 export interface SessionNode {
@@ -104,6 +103,7 @@ export type ExtMessage =
   | { type: "GET_SESSION_STATE" }
   | { type: "TOGGLE_ON"; taskGoal: string; resetContext?: boolean }
   | { type: "TOGGLE_OFF" }
+  | { type: "COLLECT_SNAPSHOT"; taskGoal: string }
   | { type: "SNAPSHOT_READY"; snapshot: ScrubbedSnapshot; taskGoal?: string }
   | { type: "CONTEXT_REQUIRED"; question: string; popupOpened: boolean }
   | { type: "CONTEXT_SUBMITTED"; answer: string }

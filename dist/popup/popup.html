@@ -5,8 +5,8 @@
   <title>PointWise</title>
   <script type="module" crossorigin src="/assets/modulepreload-polyfill-B5Qt9EMX.js"></script>
   <script type="module" crossorigin src="/assets/session-graph-Cc_7cEmY.js"></script>
-  <script type="module" crossorigin src="/assets/popup-BV7W7WN6.js"></script>
-  <link rel="stylesheet" crossorigin href="/assets/popup-BEKky8OJ.css">
+  <script type="module" crossorigin src="/assets/popup-Dylw0Yd1.js"></script>
+  <link rel="stylesheet" crossorigin href="/assets/popup-C_q7gbMu.css">
 </head>
 <body>
 
@@ -39,22 +39,22 @@
     </div>
   </header>
 
-  <!-- Context follow-up panel: opens automatically if initial prompt lacked details -->
+  <!-- Context follow-up panel: opens automatically if AI needs more details -->
   <section id="context-panel" class="context-panel hidden">
     <div class="context-badge">NEED MORE CONTEXT</div>
     <p id="context-question" class="context-question"></p>
     <textarea
       id="context-answer"
       rows="3"
-      placeholder="Add details (e.g. Student pass, Pune to Mumbai on 26 Nov, or product name)…"
+      placeholder="Add details (e.g. Student pass, Pune to Mumbai, or item name)…"
     ></textarea>
     <div class="action-row">
       <button id="context-submit-btn" class="search-btn" type="button">Continue ▶</button>
-      <button id="context-skip-btn" class="guide-current-btn" type="button">Skip</button>
+      <button id="context-skip-btn" class="secondary-btn" type="button">Skip</button>
     </div>
   </section>
 
-  <!-- Active panel: prompt dialogue, search bar & results ONLY open once turned ON -->
+  <!-- Active panel: prompt dialogue, search bar & minimal link results ONLY open once turned ON -->
   <section id="active-panel" class="active-panel hidden">
     <div id="status-bar" class="status-bar">
       <span class="pulse-dot"></span>
@@ -68,20 +68,12 @@
       placeholder="e.g. Apply for a BMTC bus pass&#10;Book a train ticket from Delhi to Agra&#10;Renew driving licence"
     ></textarea>
 
-    <div class="action-row">
-      <button id="search-btn" class="search-btn" type="button">Search Web</button>
-      <button id="guide-current-btn" class="guide-current-btn" type="button" title="Scan and guide on the currently open tab">
-        Guide Page
-      </button>
-    </div>
+    <button id="search-btn" class="search-btn" type="button">Search</button>
 
-    <!-- Keywords extracted pill row -->
-    <div id="keywords-row" class="keywords-row hidden"></div>
-
-    <!-- Google-style search results container -->
+    <!-- Minimal search results: ONLY link + validity -->
     <div id="results-container" class="results-container hidden"></div>
 
-    <!-- Footer / Gemini API key settings (only shown when ON) -->
+    <!-- Footer / Gemini API key settings -->
     <footer>
       <button id="key-btn" class="key-btn" type="button" title="Configure Gemini API key">⚙ API Key</button>
       <div id="key-row" class="key-row hidden">

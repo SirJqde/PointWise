@@ -3,14 +3,12 @@
 //
 // UX Flow:
 //   Power OFF → ONLY PointWise title + power switch visible
-//   Power ON  → prompt dialogue, keyword-matched web search &
-//               Google-style result cards with validity scores
-//   Guide     → minimizes extension UI (window.close()), opens
-//               chosen URL, activates cursor & checks context
+//   Power ON  → prompt dialogue + Search button open
+//   Results   → ONLY clickable link + validity score per card
+//   Click link→ opens website, minimizes UI, and triggers AI flow
 // ============================================================
 
 import {
-  analyzePromptKeywords,
   searchWebIntent,
   type SearchResultItem,
 } from "../lib/router.js";
@@ -35,8 +33,6 @@ const activePanel      = q("active-panel");
 const statusText       = q("status-text");
 const taskInput        = q("task-input") as HTMLTextAreaElement;
 const searchBtn        = q("search-btn") as HTMLButtonElement;
-const guideCurrentBtn  = q("guide-current-btn") as HTMLButtonElement;
-const keywordsRow      = q("keywords-row");
 const resultsContainer = q("results-container");
 const keyBtn           = q("key-btn") as HTMLButtonElement;
 const keyRow           = q("key-row");
@@ -64,8 +60,6 @@ async function restoreSession(): Promise<void> {
     const restoredPrompt = session.lastQuery || session.taskGoal;
     if (restoredPrompt) {
       taskInput.value = restoredPrompt;
-      const analysis = analyzePromptKeywords(restoredPrompt);
-      renderKeywords([...analysis.keywords, ...analysis.actionWords]);
     }
     if (session.lastResults && session.lastResults.length > 0) {
       renderResults(session.lastResults);
@@ -77,7 +71,7 @@ async function restoreSession(): Promise<void> {
     }
 
     const label = session.guiding
-      ? `Guiding: ${(session.taskGoal || "Active page").slice(0, 34)}`
+      ? `Guiding: ${(session.taskGoal || "Active site").slice(0, 34)}`
       : "Active — enter a task or website";
     renderOnState(label, false);
   } else {
@@ -172,7 +166,6 @@ function renderOffState(): void {
   appHeader.classList.remove("expanded");
   contextPanel.classList.add("hidden");
   activePanel.classList.add("hidden");
-  keywordsRow.classList.add("hidden");
   resultsContainer.classList.add("hidden");
 }
 
@@ -224,51 +217,28 @@ async function doSearch(): Promise<void> {
   }
   taskInput.classList.remove("error");
 
-  const analysis = analyzePromptKeywords(task);
-  renderKeywords([...analysis.keywords, ...analysis.actionWords]);
-
   searchBtn.disabled = true;
   searchBtn.textContent = "Searching…";
-  statusText.textContent = `Searching web & checking site validity…`;
+  statusText.textContent = "Searching & checking website validity…";
 
   const response = await searchWebIntent(task);
 
   searchBtn.disabled = false;
-  searchBtn.textContent = "Search Web";
+  searchBtn.textContent = "Search";
 
   await saveSearchResults(task, response.results);
 
   if (response.results.length === 0) {
     renderNoResults(
       response.warnings[0] ??
-        "No web results matched. Try refining your keywords or entering a domain."
+        "No results found. Try clearer keywords or a website domain."
     );
-    statusText.textContent = "No results matched — try another query";
+    statusText.textContent = "No results matched";
     return;
   }
 
   renderResults(response.results);
-  statusText.textContent = `Found ${response.results.length} checked result${response.results.length > 1 ? "s" : ""}`;
-}
-
-function renderKeywords(keywords: string[]): void {
-  keywordsRow.innerHTML = "";
-  if (keywords.length === 0) {
-    keywordsRow.classList.add("hidden");
-    return;
-  }
-
-  const label = document.createElement("span");
-  label.textContent = "Keywords:";
-  keywordsRow.appendChild(label);
-
-  for (const kw of keywords.slice(0, 6)) {
-    const chip = document.createElement("span");
-    chip.className = "kw-chip";
-    chip.textContent = kw;
-    keywordsRow.appendChild(chip);
-  }
-  keywordsRow.classList.remove("hidden");
+  statusText.textContent = `Click a link to open & guide`;
 }
 
 function renderNoResults(msg: string): void {
@@ -276,7 +246,7 @@ function renderNoResults(msg: string): void {
   resultsContainer.classList.remove("hidden");
 }
 
-// ── Render Google-style Results with Validity Scores ──────────
+// ── Render Minimal Search Results (Link + Validity ONLY) ──────
 function renderResults(items: SearchResultItem[]): void {
   resultsContainer.innerHTML = "";
 
@@ -284,16 +254,35 @@ function renderResults(items: SearchResultItem[]): void {
     const card = document.createElement("div");
     card.className = "result-card";
 
+    // 1. Clickable link (opens site, minimizes popup, activates AI guide)
+    const link = document.createElement("a");
+    link.className = "result-link";
+    link.href = item.url;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.title = item.url;
+    link.innerHTML = `
+      <span class="result-url">${escapeHtml(item.url.replace(/^https?:\/\//, ""))}</span>
+      <span class="ext-icon">↗</span>
+    `;
+    link.onclick = (e) => {
+      e.preventDefault();
+      if (!isOn) return;
+      void openAndStartGuidance(item.url);
+    };
+    card.appendChild(link);
+
+    // 2. Validity score + badge
     const score = item.validityScore;
     const badgeText =
-      score >= 70 ? "✅ Valid Site" : score >= 45 ? "⚠️ Unconfirmed" : "🚫 Low Validity";
+      score >= 70 ? "✅ Valid" : score >= 45 ? "⚠️ Unconfirmed" : "🚫 Low Trust";
     const badgeCls = score >= 70 ? "" : score >= 45 ? " warn" : " block";
     const scoreColor =
       score >= 70 ? "var(--verified)" : score >= 45 ? "var(--warn)" : "var(--danger)";
 
-    const header = document.createElement("div");
-    header.className = "result-header";
-    header.innerHTML = `
+    const validityRow = document.createElement("div");
+    validityRow.className = "result-validity";
+    validityRow.innerHTML = `
       <span class="result-badge${badgeCls}">${badgeText}</span>
       <div class="score-wrap" title="Website Validity Score">
         <div class="score-track">
@@ -302,74 +291,7 @@ function renderResults(items: SearchResultItem[]): void {
         <span class="score-num" style="color:${scoreColor}">${score}%</span>
       </div>
     `;
-    card.appendChild(header);
-
-    // Clickable Google-style title + URL link
-    const link = document.createElement("a");
-    link.className = "result-link";
-    link.href = item.url;
-    link.target = "_blank";
-    link.rel = "noopener noreferrer";
-    link.innerHTML = `
-      <div class="result-title-row">
-        <span class="result-title">${escapeHtml(item.title)}</span>
-        <span class="ext-icon">↗</span>
-      </div>
-      <span class="result-url">${escapeHtml(item.url.replace(/^https?:\/\//, ""))}</span>
-    `;
-    link.onclick = async (e) => {
-      e.preventDefault();
-      if (!isOn) return;
-      const goal = taskInput.value.trim() || `Complete task on ${item.domain}`;
-      await setPowerOn(goal, true, true);
-      await chrome.tabs.create({ url: item.url });
-      window.close();
-    };
-    card.appendChild(link);
-
-    // Snippet
-    if (item.snippet) {
-      const snip = document.createElement("p");
-      snip.className = "result-snippet";
-      snip.textContent = item.snippet;
-      card.appendChild(snip);
-    }
-
-    // Signal breakdown + matched keywords
-    const pills = document.createElement("div");
-    pills.className = "signal-pills";
-    for (const sig of item.signals) {
-      if (sig.name === "Domain Match") continue;
-      const pill = document.createElement("span");
-      pill.className = `sig-pill ${sig.passed ? "pass" : ""}`;
-      pill.title = sig.detail;
-      pill.textContent = `${sig.passed ? "✓" : "·"} ${sig.name}`;
-      pills.appendChild(pill);
-    }
-    if (item.matchedKeywords.length > 0) {
-      const kwPill = document.createElement("span");
-      kwPill.className = "sig-pill kw";
-      kwPill.textContent = `Match: ${item.matchedKeywords.slice(0, 3).join(", ")}`;
-      pills.appendChild(kwPill);
-    }
-    card.appendChild(pills);
-
-    // Warning if non-official or low score
-    if (item.warnings.length > 0 && score < 75) {
-      const warn = document.createElement("p");
-      warn.className = "result-warning";
-      warn.textContent = item.warnings[0] ?? "";
-      card.appendChild(warn);
-    }
-
-    // Open & Start Guiding button
-    const goBtn = document.createElement("button");
-    goBtn.type = "button";
-    goBtn.className = "go-btn";
-    goBtn.textContent = "Open & Start Guiding ▶";
-    goBtn.disabled = score < 20;
-    goBtn.onclick = () => void launchGuidanceOnUrl(item.url);
-    card.appendChild(goBtn);
+    card.appendChild(validityRow);
 
     resultsContainer.appendChild(card);
   }
@@ -377,57 +299,31 @@ function renderResults(items: SearchResultItem[]): void {
   resultsContainer.classList.remove("hidden");
 }
 
-// ── Open Site & Start Guiding (minimizes UI + activates cursor) ─
-async function launchGuidanceOnUrl(targetUrl: string): Promise<void> {
+// ── Open Chosen Link, Minimize UI & Trigger AI Flow ───────────
+async function openAndStartGuidance(targetUrl: string): Promise<void> {
   if (!isOn) return;
 
   const task = taskInput.value.trim() || `Complete task on ${targetUrl}`;
   await setPowerOn(task, true, true);
 
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab?.id) return;
-
-  const targetNorm = targetUrl.replace(/\/$/, "");
-  const currentNorm = (tab.url ?? "").replace(/\/$/, "");
-
-  if (currentNorm === targetNorm) {
-    await chrome.runtime
-      .sendMessage({
-        type: "TOGGLE_ON",
-        taskGoal: task,
-        resetContext: true,
-      } satisfies ExtMessage)
-      .catch(() => {});
+  if (tab?.id) {
+    const targetNorm = targetUrl.replace(/\/$/, "");
+    const currentNorm = (tab.url ?? "").replace(/\/$/, "");
+    if (currentNorm === targetNorm) {
+      await chrome.runtime
+        .sendMessage({
+          type: "TOGGLE_ON",
+          taskGoal: task,
+          resetContext: true,
+        } satisfies ExtMessage)
+        .catch(() => {});
+    } else {
+      await chrome.tabs.update(tab.id, { url: targetUrl });
+    }
   } else {
-    await chrome.tabs.update(tab.id, { url: targetUrl });
+    await chrome.tabs.create({ url: targetUrl });
   }
-
-  window.close();
-}
-
-// ── Guide Currently Open Tab Directly ─────────────────────────
-guideCurrentBtn.addEventListener("click", guideCurrentPage);
-
-async function guideCurrentPage(): Promise<void> {
-  if (!isOn) return;
-
-  const task = taskInput.value.trim();
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-
-  if (!tab?.id || !tab.url || !/^https?:\/\//.test(tab.url)) {
-    statusText.textContent = "Open a website tab (http/https) first";
-    return;
-  }
-
-  await setPowerOn(task, true, true);
-
-  await chrome.runtime
-    .sendMessage({
-      type: "TOGGLE_ON",
-      taskGoal: task,
-      resetContext: true,
-    } satisfies ExtMessage)
-    .catch(() => {});
 
   window.close();
 }

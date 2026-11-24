@@ -1,17 +1,33 @@
 // ============================================================
-// PointWise — AI Plan Generator, Sufficiency Check & Local Fallback
-// Runs inside the service worker (or test environment).
-// Calls Gemini API when an API key is configured; otherwise
-// uses deterministic local sufficiency & DOM element matching.
+// PointWise — AI Agent & Grounded Plan Generator
+// Runs exclusively in the service worker (or test suite).
+// Exposes `guide_page` ONLY as an AI-callable tool so the AI
+// fetches live webpage DOM context only when needed to make
+// decisions and produce strictly grounded action plans.
 // ============================================================
 
 import type { Plan, ScrubbedSnapshot, SnapshotElement, Step } from "./types.js";
 
 const GEMINI_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash"] as const;
 
-export interface PlanOptions {
-  apiKeyOverride?: string;
+export interface AgentRunOptions {
+  taskGoal: string;
+  pageUrl?: string;
   contextProvided?: boolean;
+  apiKeyOverride?: string;
+  /** Called ONLY by the AI when it invokes the `guide_page` tool */
+  guidePage: () => Promise<ScrubbedSnapshot | null>;
+}
+
+interface GeminiPart {
+  text?: string;
+  functionCall?: { name: string; args?: Record<string, unknown> };
+  functionResponse?: { name: string; response: Record<string, unknown> };
+}
+
+interface GeminiContent {
+  role: "user" | "model" | "function";
+  parts: GeminiPart[];
 }
 
 export async function getStoredApiKey(): Promise<string> {
@@ -23,339 +39,322 @@ export async function getStoredApiKey(): Promise<string> {
   });
 }
 
-export async function generatePlan(
-  snapshot: ScrubbedSnapshot,
-  taskGoal: string,
-  options?: PlanOptions | string
-): Promise<Plan> {
-  const opts: PlanOptions =
-    typeof options === "string" ? { apiKeyOverride: options } : (options ?? {});
-  const apiKey = opts.apiKeyOverride ?? (await getStoredApiKey());
-  const contextProvided = Boolean(opts.contextProvided);
+const GUIDE_PAGE_TOOL = {
+  functionDeclarations: [
+    {
+      name: "guide_page",
+      description:
+        "Inspects the currently open website's scrubbed interactive elements (buttons, links, inputs, forms) to gather context before deciding on clarifying questions or creating a grounded Plan of Action.",
+      parameters: {
+        type: "OBJECT",
+        properties: {
+          reason: {
+            type: "STRING",
+            description: "Brief reason why page context is needed to decide next steps.",
+          },
+        },
+        required: ["reason"],
+      },
+    },
+  ],
+};
 
+/**
+ * Runs the AI decision loop. `guidePage()` is ONLY executed when the
+ * AI requests page context via the `guide_page` tool call.
+ */
+export async function runAiPlanner(options: AgentRunOptions): Promise<Plan> {
+  const apiKey = options.apiKeyOverride ?? (await getStoredApiKey());
   if (!apiKey) {
-    if (!contextProvided) {
-      const check = checkLocalSufficiency(snapshot, taskGoal);
-      if (!check.sufficient && check.question) {
-        return {
-          taskGoal,
-          steps: [],
-          source: "local",
-          needsContext: true,
-          clarifyingQuestion: check.question,
-        };
-      }
-    }
-    return generateLocalPlan(snapshot, taskGoal);
+    return {
+      taskGoal: options.taskGoal,
+      steps: [],
+      error: "Gemini API key is required for AI page guidance. Add it in ⚙ API Key.",
+    };
   }
 
-  const prompt = buildPrompt(snapshot, taskGoal, contextProvided);
-  let lastError = "Unknown Gemini API error";
+  const contextProvided = Boolean(options.contextProvided);
+  let latestSnapshot: ScrubbedSnapshot | null = null;
+
+  const initialPrompt = buildAgentSystemPrompt(
+    options.taskGoal,
+    options.pageUrl ?? "",
+    contextProvided
+  );
+
+  const contents: GeminiContent[] = [
+    { role: "user", parts: [{ text: initialPrompt }] },
+  ];
+
+  let lastError = "Unable to reach Gemini AI";
 
   for (const model of GEMINI_MODELS) {
     const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
-    try {
-      const res = await fetch(`${endpoint}?key=${encodeURIComponent(apiKey)}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: {
-            responseMimeType: "application/json",
-            maxOutputTokens: 1024,
-            temperature: 0.2,
-          },
-        }),
-        signal: AbortSignal.timeout(12_000),
-      });
+    let modelUnavailable = false;
 
-      if (res.status === 404) {
-        lastError = `Model ${model} unavailable (404)`;
-        continue;
-      }
+    // Allow up to 3 turns (e.g., Turn 1: AI calls guide_page -> Turn 2: AI decides/plans)
+    for (let turn = 0; turn < 3; turn++) {
+      try {
+        const res = await fetch(`${endpoint}?key=${encodeURIComponent(apiKey)}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents,
+            tools: [GUIDE_PAGE_TOOL],
+            generationConfig: {
+              temperature: 0.15,
+              maxOutputTokens: 1024,
+            },
+          }),
+          signal: AbortSignal.timeout(14_000),
+        });
 
-      if (!res.ok) {
-        const errBody = await res.text().catch(() => "");
-        throw new Error(`Gemini API ${res.status}: ${errBody.slice(0, 120)}`);
-      }
+        if (res.status === 404) {
+          lastError = `Model ${model} unavailable (404)`;
+          modelUnavailable = true;
+          break;
+        }
 
-      const json = (await res.json()) as {
-        candidates?: { content?: { parts?: { text?: string }[] } }[];
-      };
-      const raw = json?.candidates?.[0]?.content?.parts?.[0]?.text ?? "{}";
-      const cleaned = raw.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "").trim();
-      const parsed = JSON.parse(cleaned) as {
-        sufficient?: boolean;
-        clarifyingQuestion?: string;
-        steps?: Step[];
-      };
+        if (!res.ok) {
+          const errBody = await res.text().catch(() => "");
+          throw new Error(`Gemini API ${res.status}: ${errBody.slice(0, 120)}`);
+        }
 
-      if (
-        !contextProvided &&
-        parsed.sufficient === false &&
-        typeof parsed.clarifyingQuestion === "string" &&
-        parsed.clarifyingQuestion.trim()
-      ) {
-        return {
-          taskGoal,
-          steps: [],
-          source: "ai",
-          needsContext: true,
-          clarifyingQuestion: parsed.clarifyingQuestion.trim(),
+        const json = (await res.json()) as {
+          candidates?: { content?: { parts?: GeminiPart[] } }[];
         };
+
+        const parts = json?.candidates?.[0]?.content?.parts ?? [];
+        const fnCall = parts.find((p) => p.functionCall?.name === "guide_page")?.functionCall;
+
+        if (fnCall) {
+          contents.push({ role: "model", parts });
+          latestSnapshot = await options.guidePage();
+
+          if (!latestSnapshot || latestSnapshot.elements.length === 0) {
+            return {
+              taskGoal: options.taskGoal,
+              steps: [],
+              error: "No interactive elements were found on this page yet.",
+            };
+          }
+
+          const compactElements = latestSnapshot.elements.map((e) => ({
+            selector: e.selector,
+            role: e.role,
+            label: e.label,
+            tagName: e.tagName,
+            type: e.inputType,
+            inViewport: e.inViewport,
+            disabled: e.disabled,
+            hasFileInput: e.hasFileInput,
+          }));
+
+          contents.push({
+            role: "function",
+            parts: [
+              {
+                functionResponse: {
+                  name: "guide_page",
+                  response: {
+                    url: latestSnapshot.url,
+                    title: latestSnapshot.title,
+                    elements: compactElements,
+                  },
+                },
+              },
+            ],
+          });
+          continue;
+        }
+
+        const textPart = parts.map((p) => p.text ?? "").join("").trim();
+        if (!textPart) {
+          throw new Error("Empty response from Gemini");
+        }
+
+        const parsed = parseAiJson(textPart);
+
+        if (
+          !contextProvided &&
+          parsed.sufficient === false &&
+          typeof parsed.clarifyingQuestion === "string" &&
+          parsed.clarifyingQuestion.trim()
+        ) {
+          return {
+            taskGoal: options.taskGoal,
+            steps: [],
+            needsContext: true,
+            clarifyingQuestion: parsed.clarifyingQuestion.trim(),
+          };
+        }
+
+        // Never accept steps unless the AI actually inspected the page via guide_page
+        if (!latestSnapshot) {
+          latestSnapshot = await options.guidePage();
+          if (!latestSnapshot || latestSnapshot.elements.length === 0) {
+            return {
+              taskGoal: options.taskGoal,
+              steps: [],
+              error: "No interactive elements found on this page.",
+            };
+          }
+
+          contents.push({ role: "model", parts: [{ text: textPart }] });
+          contents.push({
+            role: "user",
+            parts: [
+              {
+                text: `Before outputting steps, ground every selector strictly in the actual page elements returned below:\n${JSON.stringify(
+                  {
+                    url: latestSnapshot.url,
+                    title: latestSnapshot.title,
+                    elements: latestSnapshot.elements.map((e) => ({
+                      selector: e.selector,
+                      label: e.label,
+                      tagName: e.tagName,
+                      role: e.role,
+                    })),
+                  },
+                  null,
+                  2
+                )}`,
+              },
+            ],
+          });
+          continue;
+        }
+
+        const groundedSteps = normalizeAndGroundSteps(
+          parsed.steps ?? [],
+          latestSnapshot.elements
+        );
+
+        if (groundedSteps.length > 0) {
+          return { taskGoal: options.taskGoal, steps: groundedSteps };
+        }
+
+        return {
+          taskGoal: options.taskGoal,
+          steps: [],
+          error: "Could not find matching interactive elements for this task on the page.",
+        };
+      } catch (err) {
+        lastError = err instanceof Error ? err.message : String(err);
+        break;
       }
-
-      const steps = normalizeSteps(parsed.steps ?? [], snapshot.elements);
-
-      if (steps.length > 0) {
-        return { taskGoal, steps, source: "ai" };
-      }
-
-      const fallback = generateLocalPlan(snapshot, taskGoal);
-      return {
-        ...fallback,
-        warning: "AI returned no actionable elements; showing closest interactive element.",
-      };
-    } catch (err) {
-      lastError = err instanceof Error ? err.message : String(err);
     }
+
+    if (modelUnavailable) continue;
+    break;
   }
 
-  const fallback = generateLocalPlan(snapshot, taskGoal);
   return {
-    ...fallback,
-    warning: `AI unavailable (${lastError}). Showing local guidance.`,
+    taskGoal: options.taskGoal,
+    steps: [],
+    error: lastError,
   };
 }
 
-function normalizeSteps(steps: Step[], elements: SnapshotElement[]): Step[] {
-  return steps
-    .filter((s) => s && typeof s.targetSelector === "string" && s.targetSelector.trim() && s.hint)
-    .slice(0, 4)
-    .map((s) => {
-      const matched = elements.find((el) => el.selector === s.targetSelector);
-      const step: Step = {
-        targetSelector: s.targetSelector.trim(),
-        action: s.action || "click",
-        hint: s.hint.slice(0, 140),
-        sensitivityClass: s.sensitivityClass || "normal",
-      };
-      const fb = s.fallbackLabel ?? matched?.label;
-      if (fb !== undefined) step.fallbackLabel = fb;
-      if (s.errorRecovery !== undefined) step.errorRecovery = s.errorRecovery;
-      return step;
-    });
-}
-
-// ── Local Sufficiency Check ───────────────────────────────────
-
-const STOP_WORDS = new Set([
-  "a", "an", "the", "to", "for", "my", "on", "in", "of", "and",
-  "me", "with", "this", "page", "guide", "through", "website", "site", "want", "need",
-]);
-
-const GENERIC_VERBS = new Set([
-  "book", "buy", "order", "shop", "search", "find", "ticket", "tickets",
-  "bus", "train", "flight", "hotel", "food", "help", "open", "do", "something",
-  "apply", "check", "pay", "get", "make", "go", "visit",
-]);
-
-export function checkLocalSufficiency(
-  snapshot: ScrubbedSnapshot,
-  taskGoal: string
-): { sufficient: boolean; question?: string } {
-  const clean = taskGoal.toLowerCase().trim();
-  if (!clean) {
-    return {
-      sufficient: false,
-      question: "What specific task or item would you like PointWise to help you with on this page?",
-    };
-  }
-
-  const words = clean
-    .replace(/[^\w\s]/g, " ")
-    .split(/\s+/)
-    .filter((w) => w.length > 1 && !STOP_WORDS.has(w));
-
-  const specificWords = words.filter((w) => !GENERIC_VERBS.has(w));
-
-  // Ticket booking prompt missing origin, destination, or date (distinct from "bus pass" applications)
-  const isPassApplication = /\bpass\b/i.test(clean);
-  const isTicketBooking =
-    !isPassApplication &&
-    (/\b(ticket|tickets|irctc|redbus|makemytrip|flight|train)\b/i.test(clean) ||
-      (/\bbook\b/i.test(clean) && /\b(bus|train|flight|trip)\b/i.test(clean)));
-  const hasRoutePreposition = /\b(from|to)\b/i.test(clean) && specificWords.length >= 2;
-  if (isTicketBooking && !hasRoutePreposition && specificWords.length < 2) {
-    return {
-      sufficient: false,
-      question: "Where are you travelling from, where to, and on what date?",
-    };
-  }
-
-  // Bus/transit pass prompt missing pass category (student / monthly / senior citizen)
-  if (isPassApplication && !/\b(student|monthly|daily|senior|citizen|general|renew|new)\b/i.test(clean)) {
-    return {
-      sufficient: false,
-      question: "Which pass type are you applying for (e.g. Student, Monthly, General, or Renewal)?",
-    };
-  }
-
-  // Shopping / food delivery prompt missing item name
-  const isShoppingTask = /\b(amazon|flipkart|meesho|swiggy|zomato|bigbasket|buy|shop|order)\b/i.test(clean);
-  if (isShoppingTask && specificWords.length < 2) {
-    const hasSearchInput = snapshot.elements.some(
-      (el) => el.tagName === "input" && /search|query|find/i.test(`${el.label} ${el.inputType ?? ""}`)
-    );
-    if (hasSearchInput || words.length <= 3) {
-      return {
-        sufficient: false,
-        question: "What specific product, item, or dish are you looking for?",
-      };
-    }
-  }
-
-  // Very short / vague prompt with no concrete nouns
-  if (words.length <= 2 && specificWords.length <= 1) {
-    return {
-      sufficient: false,
-      question: "Can you share a few more details about what you want to do on this site?",
-    };
-  }
-
-  return { sufficient: true };
-}
-
-// ── Local Deterministic Fallback ──────────────────────────────
-
-export function generateLocalPlan(
-  snapshot: ScrubbedSnapshot,
-  taskGoal: string
-): Plan {
-  const goalWords = taskGoal
-    .toLowerCase()
-    .replace(/[^\w\s]/g, " ")
-    .split(/\s+/)
-    .filter((w) => w.length > 1 && !STOP_WORDS.has(w));
-
-  const candidates = snapshot.elements.filter((el) => el.visible && !el.disabled);
-
-  const scored = candidates
-    .map((el) => {
-      const label = el.label.toLowerCase();
-      let score = 0;
-
-      if (el.inViewport) score += 8;
-
-      for (const word of goalWords) {
-        if (label.includes(word)) score += 15;
-      }
-
-      if (el.tagName === "input" && (el.inputType === "search" || el.inputType === "text" || !el.inputType)) {
-        score += 10;
-        if (/search|from|origin|source|find|query|destination|to|enter/i.test(label)) {
-          score += 12;
-        }
-      }
-      if (el.tagName === "button" || el.role === "button" || el.inputType === "submit") {
-        score += 7;
-        if (/search|book|continue|next|apply|submit|login|sign in|get started/i.test(label)) {
-          score += 9;
-        }
-      }
-      if (el.tagName === "select") score += 6;
-
-      return { el, score };
-    })
-    .sort((a, b) => b.score - a.score);
-
-  const picked: SnapshotElement[] = [];
-  for (const item of scored) {
-    if (picked.length >= 3) break;
-    if (item.el.label || picked.length === 0) {
-      picked.push(item.el);
-    }
-  }
-
-  const steps: Step[] = picked.map((el) => {
-    const isInput =
-      el.tagName === "input" &&
-      el.inputType !== "submit" &&
-      el.inputType !== "button" &&
-      el.inputType !== "checkbox" &&
-      el.inputType !== "radio";
-
-    const labelText = el.label ? `"${el.label.slice(0, 45)}"` : `the ${el.tagName}`;
-    return {
-      targetSelector: el.selector,
-      fallbackLabel: el.label,
-      action: el.hasFileInput ? "file-upload" : isInput ? "focus" : "click",
-      hint: isInput
-        ? `Enter details in ${labelText}`
-        : `Click ${labelText} to continue`,
-      sensitivityClass: "normal",
-    };
-  });
-
-  return {
-    taskGoal,
-    steps,
-    source: "local",
-    warning: "Local match — add your Gemini API key (⚙) for full AI guidance.",
+function parseAiJson(raw: string): {
+  sufficient?: boolean;
+  clarifyingQuestion?: string;
+  steps?: Step[];
+} {
+  const stripped = raw
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/```\s*$/i, "")
+    .trim();
+  const firstBrace = stripped.indexOf("{");
+  const lastBrace = stripped.lastIndexOf("}");
+  const jsonSlice =
+    firstBrace !== -1 && lastBrace > firstBrace
+      ? stripped.slice(firstBrace, lastBrace + 1)
+      : stripped;
+  return JSON.parse(jsonSlice) as {
+    sufficient?: boolean;
+    clarifyingQuestion?: string;
+    steps?: Step[];
   };
 }
 
-export function buildPrompt(
-  snapshot: ScrubbedSnapshot,
+/**
+ * Strictly grounds every AI step against actual elements present in the
+ * snapshot returned by `guide_page` — preventing hallucinated selectors.
+ */
+export function normalizeAndGroundSteps(
+  steps: Step[],
+  elements: SnapshotElement[]
+): Step[] {
+  const bySelector = new Map(elements.map((el) => [el.selector, el]));
+
+  const valid: Step[] = [];
+  for (const s of steps) {
+    if (!s || typeof s.targetSelector !== "string" || !s.hint) continue;
+    const sel = s.targetSelector.trim();
+    let matched = bySelector.get(sel);
+
+    // Allow exact fallback label match if selector whitespace shifted
+    if (!matched && s.fallbackLabel) {
+      const targetLbl = s.fallbackLabel.trim().toLowerCase();
+      if (targetLbl) {
+        matched = elements.find((el) => el.label.trim().toLowerCase() === targetLbl);
+      }
+    }
+
+    if (!matched) continue; // Reject any hallucinated element not on the page
+
+    const step: Step = {
+      targetSelector: matched.selector,
+      action: s.action || "click",
+      hint: s.hint.slice(0, 140),
+      sensitivityClass: s.sensitivityClass || "normal",
+    };
+    if (matched.label) step.fallbackLabel = matched.label;
+    if (s.errorRecovery !== undefined) step.errorRecovery = s.errorRecovery;
+
+    valid.push(step);
+    if (valid.length >= 4) break;
+  }
+
+  return valid;
+}
+
+export function buildAgentSystemPrompt(
   taskGoal: string,
-  contextProvided = false
+  pageUrl: string,
+  contextProvided: boolean
 ): string {
-  const compactElements = snapshot.elements.map((e) => ({
-    selector: e.selector,
-    role: e.role,
-    label: e.label,
-    tagName: e.tagName,
-    type: e.inputType,
-    inViewport: e.inViewport,
-    disabled: e.disabled,
-    hasFileInput: e.hasFileInput,
-  }));
-
   return `
 You are PointWise, a step-by-step web navigation assistant.
-The user's goal is: "${taskGoal || "Help the user complete the main action on this page"}".
+User's goal: "${taskGoal || "Help the user complete their task"}"
+Current URL: ${pageUrl || "unknown"}
 Extra context already provided by user: ${contextProvided ? "YES (do NOT ask another clarifying question; set sufficient=true)" : "NO"}.
 
-Current page: ${snapshot.url}
-Page title: ${snapshot.title}
-Visible interactive elements:
-${JSON.stringify(compactElements, null, 2)}
+Process:
+1. Call the \`guide_page\` tool to inspect the actual interactive elements on the page so you have full context before deciding.
+2. Once you have the page elements from \`guide_page\`:
+   - If extra context is NO and key details are still missing to pick the right steps (e.g. pass type, origin/destination, product name), return JSON with "sufficient": false and a single concise "clarifyingQuestion".
+   - Otherwise, return JSON with "sufficient": true and 1 to 3 grounded "steps" using ONLY exact selectors copied verbatim from \`guide_page\`.
 
-First decide if the user's goal has sufficient details to give a helpful step-by-step plan on this page.
-- If extra context is already YES, you MUST set "sufficient": true.
-- Only set "sufficient": false if the goal is too vague or missing key details (e.g. "book bus ticket" without cities/date, or "buy on amazon" without what product).
-
-Return ONLY a JSON object with this exact shape:
+Return strictly valid JSON (no markdown fences) in your final message:
 {
   "sufficient": true | false,
-  "clarifyingQuestion": "<one concise question to ask the user if sufficient is false, otherwise omit or empty>",
+  "clarifyingQuestion": "<one concise question if sufficient is false>",
   "steps": [
     {
-      "targetSelector": "<exact selector copied verbatim from the elements list above>",
+      "targetSelector": "<exact selector from guide_page elements>",
       "fallbackLabel": "<exact label from that element>",
       "action": "click" | "focus" | "scroll" | "file-upload" | "pause",
-      "hint": "<clear, friendly instruction telling the user what to do next, max 120 chars>",
-      "errorRecovery": "<optional fallback hint if element moved>",
+      "hint": "<clear, short instruction for the user, max 120 chars>",
+      "errorRecovery": "<optional hint>",
       "sensitivityClass": "normal" | "captcha" | "otp" | "payment" | "legal"
     }
   ]
 }
 
 Rules:
-- Copy targetSelector verbatim from the provided elements list. Never invent selectors.
-- Include the NEXT 1 to 3 actionable steps visible on THIS page in logical order when sufficient is true.
-- Never instruct entering passwords, card numbers, OTPs, or sensitive PII.
-- Set sensitivityClass appropriately if a field involves captcha, otp, payment, or legal terms.
-- Return valid JSON only — no markdown fences, no extra text.
+- Never invent or guess CSS selectors. Only copy exact selectors returned by \`guide_page\`.
+- Never ask users to share passwords, OTPs, or payment details.
 `.trim();
 }

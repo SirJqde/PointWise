@@ -1,11 +1,10 @@
 // ============================================================
 // PointWise — Sandbox (isolated reasoning context)
-// Receives scrubbed snapshots + optional apiKey via postMessage,
+// Receives scrubbed snapshots + apiKey via postMessage,
 // calls Gemini AI, returns a Plan.
-// NO access to real DOM, cookies, or chrome.* APIs.
 // ============================================================
 
-import { buildPrompt } from "../lib/ai-planner.js";
+import { buildAgentSystemPrompt } from "../lib/ai-planner.js";
 import type { ScrubbedSnapshot, Plan, Step } from "../lib/types.js";
 
 const GEMINI_ENDPOINT =
@@ -39,7 +38,7 @@ async function callGeminiFromSandbox(
 ): Promise<Plan> {
   if (!apiKey) throw new Error("No API key provided");
 
-  const prompt = buildPrompt(snapshot, taskGoal);
+  const prompt = `${buildAgentSystemPrompt(taskGoal, snapshot.url, true)}\n\nPage Elements:\n${JSON.stringify(snapshot.elements)}`;
   const res = await fetch(`${GEMINI_ENDPOINT}?key=${encodeURIComponent(apiKey)}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -57,5 +56,5 @@ async function callGeminiFromSandbox(
   const raw: string = json?.candidates?.[0]?.content?.parts?.[0]?.text ?? "{}";
   const cleaned = raw.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "").trim();
   const parsed = JSON.parse(cleaned) as { steps?: Step[] };
-  return { taskGoal, steps: parsed.steps ?? [], source: "ai" };
+  return { taskGoal, steps: parsed.steps ?? [] };
 }

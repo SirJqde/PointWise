@@ -2,7 +2,8 @@
 // PointWise — Service Worker
 // Manages persistent power state, navigation tracking,
 // content-script injection, context re-popup, and AI plans.
-// AI calls ONLY run when PointWise power switch is ON.
+// `guidePage()` is ONLY invoked by the AI planner when it needs
+// live website context to make decisions.
 // ============================================================
 
 import {
@@ -14,8 +15,8 @@ import {
   pushNavigation,
   setContextQuestion,
 } from "../lib/session-graph.js";
-import { generatePlan } from "../lib/ai-planner.js";
-import type { ExtMessage } from "../lib/types.js";
+import { runAiPlanner } from "../lib/ai-planner.js";
+import type { ExtMessage, ScrubbedSnapshot } from "../lib/types.js";
 
 const CONTENT_SCRIPT_PATH = "content/content-main.js";
 const spaDebounceTimers = new Map<number, ReturnType<typeof setTimeout>>();
@@ -49,6 +50,7 @@ async function handleMessage(
     case "TOGGLE_ON": {
       let tabId = sender.tab?.id;
       let tabUrl = sender.tab?.url;
+      let windowId = sender.tab?.windowId;
       if (!tabId) {
         const [activeTab] = await chrome.tabs.query({
           active: true,
@@ -56,6 +58,7 @@ async function handleMessage(
         });
         tabId = activeTab?.id;
         tabUrl = activeTab?.url;
+        windowId = activeTab?.windowId;
       }
       if (!tabId) return { error: "No active tab" };
 
@@ -63,7 +66,7 @@ async function handleMessage(
       await setIcon("green");
 
       if (isInjectableUrl(tabUrl)) {
-        await ensureContentScriptAndActivate(tabId, msg.taskGoal);
+        await startAiGuidanceOnTab(tabId, tabUrl ?? "", msg.taskGoal, windowId);
       }
 
       return { ok: true };
@@ -86,73 +89,16 @@ async function handleMessage(
     }
 
     case "SNAPSHOT_READY": {
-      // HARD GATE: never scan or call AI unless power switch is ON
+      // Used when user clicks Re-scan on the page overlay — still gated by session.on
       const session = await loadSession();
-      if (!session || !session.on) {
-        return { ok: true, skipped: true };
-      }
+      if (!session || !session.on) return { ok: true, skipped: true };
 
       const tabId = sender.tab?.id;
-      const taskGoal = msg.taskGoal || session.taskGoal || "Guide user on this page";
+      const tabUrl = sender.tab?.url ?? "";
+      if (!tabId) return { error: "No sender tab" };
 
-      try {
-        const plan = await generatePlan(msg.snapshot, taskGoal, {
-          contextProvided: Boolean(session.contextProvided),
-        });
-
-        if (plan.needsContext && plan.clarifyingQuestion) {
-          await setContextQuestion(plan.clarifyingQuestion);
-
-          // Try to re-popup the extension UI to ask the additional question
-          let popupOpened = false;
-          if (typeof chrome.action?.openPopup === "function") {
-            try {
-              const winId = sender.tab?.windowId;
-              await chrome.action.openPopup(winId ? { windowId: winId } : undefined);
-              popupOpened = true;
-            } catch {
-              popupOpened = false;
-            }
-          }
-
-          if (tabId) {
-            await chrome.tabs
-              .sendMessage(tabId, {
-                type: "CONTEXT_REQUIRED",
-                question: plan.clarifyingQuestion,
-                popupOpened,
-              } satisfies ExtMessage)
-              .catch(() => {});
-          }
-          return { ok: true, needsContext: true, popupOpened };
-        }
-
-        if (tabId) {
-          if (plan.steps.length > 0) {
-            await chrome.tabs.sendMessage(tabId, {
-              type: "PLAN_READY",
-              plan,
-            } satisfies ExtMessage);
-          } else {
-            await chrome.tabs.sendMessage(tabId, {
-              type: "PLAN_ERROR",
-              message:
-                plan.warning ??
-                "No actionable elements found on this page yet. Try Re-scan.",
-            } satisfies ExtMessage);
-          }
-        }
-      } catch (err) {
-        if (tabId) {
-          await chrome.tabs
-            .sendMessage(tabId, {
-              type: "PLAN_ERROR",
-              message: err instanceof Error ? err.message : "Failed to analyze page.",
-            } satisfies ExtMessage)
-            .catch(() => {});
-        }
-      }
-
+      const taskGoal = msg.taskGoal || session.taskGoal || "";
+      await startAiGuidanceOnTab(tabId, tabUrl, taskGoal, sender.tab?.windowId);
       return { ok: true };
     }
 
@@ -162,6 +108,7 @@ async function handleMessage(
 
       let tabId = sender.tab?.id;
       let tabUrl = sender.tab?.url;
+      let windowId = sender.tab?.windowId;
       if (!tabId) {
         const [activeTab] = await chrome.tabs.query({
           active: true,
@@ -169,9 +116,10 @@ async function handleMessage(
         });
         tabId = activeTab?.id;
         tabUrl = activeTab?.url;
+        windowId = activeTab?.windowId;
       }
       if (tabId && isInjectableUrl(tabUrl)) {
-        await ensureContentScriptAndActivate(tabId, updated.taskGoal);
+        await startAiGuidanceOnTab(tabId, tabUrl ?? "", updated.taskGoal, windowId);
       }
       return { ok: true, taskGoal: updated.taskGoal };
     }
@@ -189,6 +137,101 @@ async function handleMessage(
 
     default:
       return { error: "Unknown message type" };
+  }
+}
+
+// ── AI Orchestrator (guidePage ONLY called by the AI) ─────────
+
+async function startAiGuidanceOnTab(
+  tabId: number,
+  tabUrl: string,
+  taskGoal: string,
+  windowId?: number
+): Promise<void> {
+  const session = await loadSession();
+  if (!session || !session.on) return;
+
+  await ensureContentScriptAndActivate(tabId, taskGoal);
+
+  const plan = await runAiPlanner({
+    taskGoal,
+    pageUrl: tabUrl,
+    contextProvided: Boolean(session.contextProvided),
+    // `guidePage` is ONLY invoked when the AI requests page context via tool call
+    guidePage: () => guidePage(tabId, taskGoal),
+  });
+
+  // Verify session wasn't turned OFF while AI was thinking
+  const latest = await loadSession();
+  if (!latest || !latest.on) return;
+
+  if (plan.needsContext && plan.clarifyingQuestion) {
+    await setContextQuestion(plan.clarifyingQuestion);
+
+    let popupOpened = false;
+    if (typeof chrome.action?.openPopup === "function") {
+      try {
+        await chrome.action.openPopup(windowId ? { windowId } : undefined);
+        popupOpened = true;
+      } catch {
+        popupOpened = false;
+      }
+    }
+
+    await chrome.tabs
+      .sendMessage(tabId, {
+        type: "CONTEXT_REQUIRED",
+        question: plan.clarifyingQuestion,
+        popupOpened,
+      } satisfies ExtMessage)
+      .catch(() => {});
+    return;
+  }
+
+  if (plan.error) {
+    await chrome.tabs
+      .sendMessage(tabId, {
+        type: "PLAN_ERROR",
+        message: plan.error,
+      } satisfies ExtMessage)
+      .catch(() => {});
+    return;
+  }
+
+  if (plan.steps.length > 0) {
+    await chrome.tabs
+      .sendMessage(tabId, {
+        type: "PLAN_READY",
+        plan,
+      } satisfies ExtMessage)
+      .catch(() => {});
+  } else {
+    await chrome.tabs
+      .sendMessage(tabId, {
+        type: "PLAN_ERROR",
+        message: "No matching actionable steps found on this page.",
+      } satisfies ExtMessage)
+      .catch(() => {});
+  }
+}
+
+/**
+ * Private helper invoked ONLY by the AI planner tool (`guide_page`)
+ * to collect a scrubbed DOM snapshot of the active website for context.
+ */
+async function guidePage(
+  tabId: number,
+  taskGoal: string
+): Promise<ScrubbedSnapshot | null> {
+  try {
+    await ensureContentScriptAndActivate(tabId, taskGoal);
+    const res = (await chrome.tabs.sendMessage(tabId, {
+      type: "COLLECT_SNAPSHOT",
+      taskGoal,
+    } satisfies ExtMessage)) as { snapshot?: ScrubbedSnapshot } | undefined;
+    return res?.snapshot ?? null;
+  } catch {
+    return null;
   }
 }
 
@@ -262,7 +305,13 @@ chrome.webNavigation.onCompleted.addListener(async (details) => {
   try {
     const origin = new URL(details.url).origin;
     await pushNavigation(details.tabId, origin);
-    await ensureContentScriptAndActivate(details.tabId, session.taskGoal);
+    const tab = await chrome.tabs.get(details.tabId).catch(() => null);
+    await startAiGuidanceOnTab(
+      details.tabId,
+      details.url,
+      session.taskGoal,
+      tab?.windowId
+    );
   } catch {
     // Tab may have closed or restricted
   }
@@ -283,7 +332,13 @@ chrome.webNavigation.onHistoryStateUpdated.addListener(async (details) => {
     const latest = await loadSession();
     if (!latest || !latest.on || !latest.guiding) return;
     try {
-      await ensureContentScriptAndActivate(details.tabId, latest.taskGoal);
+      const tab = await chrome.tabs.get(details.tabId).catch(() => null);
+      await startAiGuidanceOnTab(
+        details.tabId,
+        details.url,
+        latest.taskGoal,
+        tab?.windowId
+      );
     } catch {
       // Ignore if tab gone
     }

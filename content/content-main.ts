@@ -1,15 +1,15 @@
 // ============================================================
 // PointWise — Content Script
-// Orchestrates DOM snapshotting, context prompt fallback,
-// Plan of Action confirmation, cursor-attached action guide,
-// element highlighting, and pre-flight file checks.
+// Responds to AI `COLLECT_SNAPSHOT` calls (via guide_page),
+// presents Plan of Action confirmation, highlights elements,
+// and attaches action guidance to the user's cursor.
 // ============================================================
 
 import { buildSnapshot } from "../lib/snapshot.js";
 import { detectSensitivity } from "../lib/sensitivity.js";
 import { CursorOverlay, type DialogueOptions } from "./overlay.js";
 import { hookFileInputs, ValidationConstraints } from "./file-validator.js";
-import type { ExtMessage, Plan, Step } from "../lib/types.js";
+import type { ExtMessage, Plan, ScrubbedSnapshot, Step } from "../lib/types.js";
 
 const GLOBAL_FLAG = "__pointwiseContentInitialized";
 
@@ -37,7 +37,7 @@ function initPointWiseContent(): void {
       case "TOGGLE_ON":
         sessionOn = true;
         activeTaskGoal = msg.taskGoal || activeTaskGoal;
-        whenDomReady(() => startOrRescanSession(activeTaskGoal));
+        whenDomReady(() => activateCursorOverlay());
         sendResponse({ ok: true });
         return false;
 
@@ -46,6 +46,17 @@ function initPointWiseContent(): void {
         teardown();
         sendResponse({ ok: true });
         return false;
+
+      case "COLLECT_SNAPSHOT":
+        // Invoked ONLY when the AI calls `guide_page` for page context
+        if (!sessionOn) {
+          sendResponse({ snapshot: null });
+          return false;
+        }
+        collectSnapshotWithHydration()
+          .then((snapshot) => sendResponse({ snapshot }))
+          .catch(() => sendResponse({ snapshot: null }));
+        return true; // keep channel open for async response
 
       case "CONTEXT_REQUIRED":
         if (!sessionOn || !overlay) return false;
@@ -57,7 +68,6 @@ function initPointWiseContent(): void {
         if (!sessionOn || !overlay) return false;
         currentPlan = msg.plan;
         currentStepIndex = 0;
-        // Present the Plan of Action and ask for user confirmation first
         overlay.showPlanConfirmation(msg.plan);
         sendResponse({ ok: true });
         return false;
@@ -83,13 +93,12 @@ function initPointWiseContent(): void {
     }
   }
 
-  function startOrRescanSession(taskGoal: string): void {
+  function activateCursorOverlay(): void {
     if (!sessionOn || !document.body) return;
 
     if (!overlay) {
       overlay = new CursorOverlay();
 
-      // Once user confirms the Plan of Action, highlight Step 1 & attach action dialogue to cursor
       overlay.onConfirm(() => {
         if (!sessionOn || !currentPlan) return;
         currentStepIndex = 0;
@@ -108,7 +117,7 @@ function initPointWiseContent(): void {
       });
 
       overlay.onNext(() => advanceOrRescan());
-      overlay.onRescan(() => triggerScan(activeTaskGoal));
+      overlay.onRescan(() => requestAiRescan());
       overlay.onDismiss(() => {
         cleanupStepWatch?.();
         cleanupStepWatch = null;
@@ -131,36 +140,37 @@ function initPointWiseContent(): void {
       });
     }
 
-    triggerScan(taskGoal);
+    overlay.showScanning();
   }
 
-  function triggerScan(taskGoal: string): void {
+  function collectSnapshotWithHydration(): Promise<ScrubbedSnapshot> {
+    return new Promise((resolve) => {
+      whenDomReady(() => {
+        const first = buildSnapshot();
+        if (first.elements.length >= 3) {
+          resolve(first);
+          return;
+        }
+        setTimeout(() => {
+          resolve(buildSnapshot());
+        }, 550);
+      });
+    });
+  }
+
+  function requestAiRescan(): void {
     if (!sessionOn || !overlay) return;
     cleanupStepWatch?.();
     cleanupStepWatch = null;
     overlay.showScanning();
-
-    let snapshot = buildSnapshot();
-
-    // Give SPAs a brief moment to hydrate if DOM currently looks sparse
-    if (snapshot.elements.length < 3) {
-      setTimeout(() => {
-        if (!sessionOn) return;
-        snapshot = buildSnapshot();
-        chrome.runtime.sendMessage({
-          type: "SNAPSHOT_READY",
-          snapshot,
-          taskGoal,
-        } satisfies ExtMessage);
-      }, 600);
-      return;
-    }
-
-    chrome.runtime.sendMessage({
-      type: "SNAPSHOT_READY",
-      snapshot,
-      taskGoal,
-    } satisfies ExtMessage);
+    const snapshot = buildSnapshot();
+    chrome.runtime
+      .sendMessage({
+        type: "SNAPSHOT_READY",
+        snapshot,
+        taskGoal: activeTaskGoal,
+      } satisfies ExtMessage)
+      .catch(() => {});
   }
 
   function teardown(): void {
@@ -177,7 +187,7 @@ function initPointWiseContent(): void {
   function advanceOrRescan(): void {
     if (!sessionOn || !overlay) return;
     if (!currentPlan) {
-      triggerScan(activeTaskGoal);
+      requestAiRescan();
       return;
     }
     const nextIdx = currentStepIndex + 1;
@@ -185,7 +195,7 @@ function initPointWiseContent(): void {
       currentStepIndex = nextIdx;
       void executeStep(nextIdx);
     } else {
-      triggerScan(activeTaskGoal);
+      requestAiRescan();
     }
   }
 
@@ -243,14 +253,8 @@ function initPointWiseContent(): void {
       totalSteps: currentPlan.steps.length,
       action: step.action,
     };
-    if (index === 0 && currentPlan.warning !== undefined) {
-      dialogueOpts.warning = currentPlan.warning;
-    }
     if (step.errorRecovery !== undefined) {
       dialogueOpts.error = step.errorRecovery;
-    }
-    if (currentPlan.source !== undefined) {
-      dialogueOpts.source = currentPlan.source;
     }
 
     await overlay.pointAtElement(target, dialogueOpts);
@@ -312,7 +316,7 @@ function initPointWiseContent(): void {
         if (isElementVisible(el)) return el;
       }
     } catch {
-      // Invalid selector from AI — fall back to label lookup
+      // Invalid selector — fall back to label lookup
     }
 
     if (step.fallbackLabel) {
