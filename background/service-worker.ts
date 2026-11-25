@@ -1,11 +1,3 @@
-// ============================================================
-// PointWise — Service Worker
-// Manages persistent power state, navigation tracking,
-// content-script injection, context re-popup, and AI plans.
-// `guidePage()` is ONLY invoked by the AI planner when it needs
-// live website context to make decisions.
-// ============================================================
-
 import {
   advanceStep,
   applyContextAnswer,
@@ -13,125 +5,126 @@ import {
   createSession,
   loadSession,
   pushNavigation,
+  saveGuidanceFailure,
+  saveGuidanceRequest,
+  saveSearchResults,
   setContextQuestion,
+  setPowerOn,
 } from "../lib/session-graph.js";
 import { runAiPlanner } from "../lib/ai-planner.js";
-import type { ExtMessage, ScrubbedSnapshot } from "../lib/types.js";
+import type { ExtMessage, GuidanceFailure, GuidanceRequest, ScrubbedSnapshot } from "../lib/types.js";
 
-const CONTENT_SCRIPT_PATH = "content/content-main.js";
-const spaDebounceTimers = new Map<number, ReturnType<typeof setTimeout>>();
+let activeRequest: GuidanceRequest | undefined;
+let commandQueue: Promise<unknown> = loadSession().then((session) => {
+  activeRequest = session?.request;
+}).catch(console.error);
 
-// ── Message handler ───────────────────────────────────────────
+function enqueue<T>(command: () => Promise<T>): Promise<T> {
+  const next = commandQueue.then(command);
+  commandQueue = next.catch(() => {});
+  return next;
+}
 
 chrome.runtime.onMessage.addListener((msg: ExtMessage, sender, sendResponse) => {
-  handleMessage(msg, sender)
+  void enqueue(() => handleMessage(msg, sender))
     .then(sendResponse)
     .catch((err) => {
       console.error("[PointWise SW]", err);
-      sendResponse({ error: String(err) });
+      sendResponse({ error: "PointWise couldn’t complete that action. Try again." });
     });
   return true;
 });
 
-async function handleMessage(
-  msg: ExtMessage,
-  sender: chrome.runtime.MessageSender
-): Promise<unknown> {
+async function handleMessage(msg: ExtMessage, sender: chrome.runtime.MessageSender) {
+  const session = await loadSession();
   switch (msg.type) {
-    case "GET_SESSION_STATE": {
-      const session = await loadSession();
+    case "ENABLE_SEARCH":
+      if (sender.tab) return { skipped: true };
+      await setPowerOn();
+      await setIcon("green");
+      return { ok: true };
+
+    case "SAVE_SEARCH_RESULTS":
+      if (sender.tab) return { skipped: true };
+      await saveSearchResults(msg.query, msg.results);
+      return { ok: true };
+
+    case "GET_SESSION_STATE":
       return {
         on: Boolean(session?.on),
         guiding: Boolean(session?.guiding),
         taskGoal: session?.taskGoal ?? "",
       };
-    }
 
     case "TOGGLE_ON": {
-      let tabId = sender.tab?.id;
-      let tabUrl = sender.tab?.url;
-      let windowId = sender.tab?.windowId;
-      if (!tabId) {
-        const [activeTab] = await chrome.tabs.query({
-          active: true,
-          currentWindow: true,
-        });
-        tabId = activeTab?.id;
-        tabUrl = activeTab?.url;
-        windowId = activeTab?.windowId;
-      }
-      if (!tabId) return { error: "No active tab" };
-
-      await createSession(msg.taskGoal, tabId, tabUrl ?? "", Boolean(msg.resetContext));
-      await setIcon("green");
-
-      if (isInjectableUrl(tabUrl)) {
-        await startAiGuidanceOnTab(tabId, tabUrl ?? "", msg.taskGoal, windowId);
+      if (!session?.on || sender.tab || !msg.taskGoal.trim()) {
+        return { error: "Turn PointWise on and enter a task." };
       }
 
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      const requestedUrl = msg.targetUrl ?? tab?.url;
+      if (!requestedUrl || !isInjectableUrl(requestedUrl)) {
+        return { error: "Open a website in this tab, then choose Guide this page." };
+      }
+      if (!msg.targetUrl && (tab?.status !== "complete" || tab.pendingUrl)) {
+        return { error: "Wait for this page to finish loading, then try again." };
+      }
+      const targetUrl = new URL(requestedUrl).href;
+      const previousTab = session.tabId;
+      activeRequest = undefined;
+      if (previousTab !== undefined) await stopOverlay(previousTab);
+
+      const selectedTab = tab?.id === undefined
+        ? await chrome.tabs.create({ active: true })
+        : tab;
+      const tabId = selectedTab.id;
+      if (tabId === undefined) return { error: "Could not open a tab for guidance." };
+
+      await createSession(msg.taskGoal, tabId, new URL(targetUrl).origin);
+      if (selectedTab.url === targetUrl && selectedTab.status === "complete") {
+        await startGuidance(tabId, targetUrl, msg.taskGoal, false);
+      } else {
+        await chrome.tabs.update(tabId, { url: targetUrl });
+      }
       return { ok: true };
     }
 
-    case "TOGGLE_OFF": {
+    case "TOGGLE_OFF":
+      activeRequest = undefined;
       await clearSession();
       await setIcon("blue");
-
-      const tabs = await chrome.tabs.query({});
-      await Promise.allSettled(
-        tabs
-          .filter((t) => typeof t.id === "number")
-          .map((t) =>
-            chrome.tabs.sendMessage(t.id!, { type: "TOGGLE_OFF" } satisfies ExtMessage)
-          )
-      );
-
+      if (session?.tabId !== undefined) await stopOverlay(session.tabId);
       return { ok: true };
-    }
 
-    case "SNAPSHOT_READY": {
-      // Used when user clicks Re-scan on the page overlay — still gated by session.on
-      const session = await loadSession();
-      if (!session || !session.on) return { ok: true, skipped: true };
-
-      const tabId = sender.tab?.id;
-      const tabUrl = sender.tab?.url ?? "";
-      if (!tabId) return { error: "No sender tab" };
-
-      const taskGoal = msg.taskGoal || session.taskGoal || "";
-      await startAiGuidanceOnTab(tabId, tabUrl, taskGoal, sender.tab?.windowId);
-      return { ok: true };
-    }
-
+    case "RESCAN":
+    case "STEP_COMPLETE":
     case "CONTEXT_SUBMITTED": {
-      const updated = await applyContextAnswer(msg.answer);
-      if (!updated) return { error: "No active session" };
-
-      let tabId = sender.tab?.id;
-      let tabUrl = sender.tab?.url;
-      let windowId = sender.tab?.windowId;
-      if (!tabId) {
-        const [activeTab] = await chrome.tabs.query({
-          active: true,
-          currentWindow: true,
-        });
-        tabId = activeTab?.id;
-        tabUrl = activeTab?.url;
-        windowId = activeTab?.windowId;
+      const request = activeRequest;
+      if (!session?.on || !session.guiding || !request || request.id !== msg.requestId ||
+          session.tabId !== request.tabId ||
+          (sender.tab && (sender.tab.id !== request.tabId || sender.frameId !== 0 ||
+            sender.url !== request.pageUrl))) {
+        return { skipped: true };
       }
-      if (tabId && isInjectableUrl(tabUrl)) {
-        await startAiGuidanceOnTab(tabId, tabUrl ?? "", updated.taskGoal, windowId);
+      if (msg.type === "STEP_COMPLETE") {
+        if (sender.tab) await advanceStep(msg.stepIndex + 1);
+      } else if (msg.type === "RESCAN") {
+        if (!sender.tab) {
+          const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+          if (tab?.id !== request.tabId || tab.url !== request.pageUrl || tab.pendingUrl ||
+              activeRequest !== request) {
+            return { error: "Return to the tab you were guiding, then try again." };
+          }
+        }
+        await startGuidance(request.tabId, request.pageUrl, session.taskGoal,
+          Boolean(session.contextProvided));
+      } else {
+        if (session.contextRequestId !== request.id) return { skipped: true };
+        const updated = await applyContextAnswer(msg.answer);
+        if (updated && activeRequest === request) {
+          await startGuidance(request.tabId, request.pageUrl, updated.taskGoal, true);
+        }
       }
-      return { ok: true, taskGoal: updated.taskGoal };
-    }
-
-    case "STEP_COMPLETE": {
-      await advanceStep(msg.stepIndex + 1);
-      return { ok: true };
-    }
-
-    case "SESSION_NAV": {
-      const tabId = sender.tab?.id;
-      if (tabId) await pushNavigation(tabId, msg.origin);
       return { ok: true };
     }
 
@@ -140,209 +133,159 @@ async function handleMessage(
   }
 }
 
-// ── AI Orchestrator (guidePage ONLY called by the AI) ─────────
+async function startGuidance(tabId: number, pageUrl: string, taskGoal: string, contextProvided: boolean) {
+  const request = { id: crypto.randomUUID(), tabId, pageUrl };
+  activeRequest = request;
+  await saveGuidanceRequest(request);
+  if (activeRequest !== request) return;
+  void runGuidance(request, taskGoal, contextProvided).catch((error) => {
+    console.error("[PointWise guidance]", error);
+    return enqueue(() => publishFailure(request, {
+      message: "PointWise couldn’t start guidance on this page. Reload the page and try again.",
+      recovery: "retry",
+    }));
+  }).catch(console.error);
+}
 
-async function startAiGuidanceOnTab(
-  tabId: number,
-  tabUrl: string,
+async function publishFailure(request: GuidanceRequest, failure: GuidanceFailure): Promise<void> {
+  if (activeRequest !== request) return;
+  const tab = await chrome.tabs.get(request.tabId).catch(() => null);
+  if (activeRequest !== request || tab?.url !== request.pageUrl || tab.pendingUrl) return;
+
+  await saveGuidanceFailure(failure);
+  if (activeRequest === request) {
+    await chrome.tabs.sendMessage(request.tabId, {
+      type: "PLAN_ERROR", requestId: request.id, ...failure,
+    } satisfies ExtMessage, { frameId: 0 }).catch(() => {});
+  }
+}
+
+async function runGuidance(
+  request: GuidanceRequest,
   taskGoal: string,
-  windowId?: number
+  contextProvided: boolean
 ): Promise<void> {
-  const session = await loadSession();
-  if (!session || !session.on) return;
+  const { id: requestId, tabId, pageUrl } = request;
+  const target = { frameId: 0 };
+  const loaded = await chrome.tabs.sendMessage(tabId, { type: "PING" }, target)
+    .then((reply) => Boolean(reply?.ok), () => false);
+  if (activeRequest !== request) return;
+  if (!loaded) {
+    await chrome.scripting.executeScript({ target: { tabId }, files: ["content/content-main.js"] });
+  }
+  if (activeRequest !== request) return;
 
-  await ensureContentScriptAndActivate(tabId, taskGoal);
+  const activated = await chrome.tabs.sendMessage(tabId, {
+    type: "GUIDANCE_START", requestId, pageUrl,
+  } satisfies ExtMessage, target);
+  if (activeRequest !== request) return;
+  if (!activated?.ok) throw new Error("The page did not activate the guidance overlay.");
 
   const plan = await runAiPlanner({
     taskGoal,
-    pageUrl: tabUrl,
-    contextProvided: Boolean(session.contextProvided),
-    // `guidePage` is ONLY invoked when the AI requests page context via tool call
-    guidePage: () => guidePage(tabId, taskGoal),
+    pageUrl,
+    contextProvided,
+    guidePage: async () => {
+      if (activeRequest !== request) return null;
+      const reply = await chrome.tabs.sendMessage(tabId, {
+        type: "COLLECT_SNAPSHOT", requestId,
+      } satisfies ExtMessage, target).catch(() => null) as { snapshot?: ScrubbedSnapshot } | null;
+      return activeRequest === request ? reply?.snapshot ?? null : null;
+    },
   });
 
-  // Verify session wasn't turned OFF while AI was thinking
-  const latest = await loadSession();
-  if (!latest || !latest.on) return;
+  await enqueue(async () => {
+    if (activeRequest !== request) return;
+    const tab = await chrome.tabs.get(tabId).catch(() => null);
+    if (activeRequest !== request || tab?.url !== pageUrl || tab.pendingUrl) return;
 
-  if (plan.needsContext && plan.clarifyingQuestion) {
-    await setContextQuestion(plan.clarifyingQuestion);
-
-    let popupOpened = false;
-    if (typeof chrome.action?.openPopup === "function") {
-      try {
-        await chrome.action.openPopup(windowId ? { windowId } : undefined);
-        popupOpened = true;
-      } catch {
-        popupOpened = false;
+    let message: ExtMessage;
+    if (plan.needsContext && plan.clarifyingQuestion) {
+      await setContextQuestion(plan.clarifyingQuestion, requestId);
+      if (activeRequest !== request) return;
+      let popupOpened = false;
+      if (tab.active && typeof chrome.action.openPopup === "function") {
+        popupOpened = await chrome.action.openPopup({ windowId: tab.windowId })
+          .then(() => true, () => false);
       }
+      message = { type: "CONTEXT_REQUIRED", requestId, question: plan.clarifyingQuestion, popupOpened };
+    } else if (plan.error || plan.steps.length === 0) {
+      await publishFailure(request, {
+        message: plan.error ?? "No matching actionable steps found on this page.",
+        recovery: plan.recovery ?? "rescan",
+      });
+      return;
+    } else {
+      message = { type: "PLAN_READY", requestId, plan };
     }
-
-    await chrome.tabs
-      .sendMessage(tabId, {
-        type: "CONTEXT_REQUIRED",
-        question: plan.clarifyingQuestion,
-        popupOpened,
-      } satisfies ExtMessage)
-      .catch(() => {});
-    return;
-  }
-
-  if (plan.error) {
-    await chrome.tabs
-      .sendMessage(tabId, {
-        type: "PLAN_ERROR",
-        message: plan.error,
-      } satisfies ExtMessage)
-      .catch(() => {});
-    return;
-  }
-
-  if (plan.steps.length > 0) {
-    await chrome.tabs
-      .sendMessage(tabId, {
-        type: "PLAN_READY",
-        plan,
-      } satisfies ExtMessage)
-      .catch(() => {});
-  } else {
-    await chrome.tabs
-      .sendMessage(tabId, {
-        type: "PLAN_ERROR",
-        message: "No matching actionable steps found on this page.",
-      } satisfies ExtMessage)
-      .catch(() => {});
-  }
+    if (activeRequest === request) {
+      await chrome.tabs.sendMessage(tabId, message, target).catch(() => {});
+    }
+  });
 }
 
-/**
- * Private helper invoked ONLY by the AI planner tool (`guide_page`)
- * to collect a scrubbed DOM snapshot of the active website for context.
- */
-async function guidePage(
-  tabId: number,
-  taskGoal: string
-): Promise<ScrubbedSnapshot | null> {
-  try {
-    await ensureContentScriptAndActivate(tabId, taskGoal);
-    const res = (await chrome.tabs.sendMessage(tabId, {
-      type: "COLLECT_SNAPSHOT",
-      taskGoal,
-    } satisfies ExtMessage)) as { snapshot?: ScrubbedSnapshot } | undefined;
-    return res?.snapshot ?? null;
-  } catch {
-    return null;
-  }
+function stopOverlay(tabId: number): Promise<unknown> {
+  return chrome.tabs.sendMessage(tabId, { type: "TOGGLE_OFF" }, { frameId: 0 }).catch(() => {});
 }
 
-// ── Content script injection helper ───────────────────────────
-
-function isInjectableUrl(url?: string): boolean {
-  if (!url) return false;
+function isInjectableUrl(url: string): boolean {
   return url.startsWith("http://") || url.startsWith("https://");
 }
 
-async function ensureContentScriptAndActivate(
-  tabId: number,
-  taskGoal: string
-): Promise<void> {
-  let alreadyLoaded = false;
-  try {
-    const pong = (await chrome.tabs.sendMessage(tabId, {
-      type: "PING",
-    } satisfies ExtMessage)) as { ok?: boolean } | undefined;
-    alreadyLoaded = Boolean(pong?.ok);
-  } catch {
-    alreadyLoaded = false;
-  }
-
-  if (!alreadyLoaded) {
-    await chrome.scripting.executeScript({
-      target: { tabId },
-      files: [CONTENT_SCRIPT_PATH],
-    });
-  }
-
-  await chrome.tabs.sendMessage(tabId, {
-    type: "TOGGLE_ON",
-    taskGoal,
-  } satisfies ExtMessage);
-}
-
-// ── Icon helpers ──────────────────────────────────────────────
-
 async function setIcon(state: "green" | "blue"): Promise<void> {
-  const suffix = state === "green" ? "-green" : "-blue";
-  await chrome.action
-    .setIcon({
-      path: {
-        "16": `assets/icons/icon16${suffix}.png`,
-        "48": `assets/icons/icon48${suffix}.png`,
-        "128": `assets/icons/icon128${suffix}.png`,
-      },
-    })
-    .catch(() => {});
+  await chrome.action.setIcon({
+    path: {
+      "16": `assets/icons/icon16-${state}.png`,
+      "48": `assets/icons/icon48-${state}.png`,
+      "128": `assets/icons/icon128-${state}.png`,
+    },
+  }).catch(() => {});
 }
 
-chrome.runtime.onInstalled.addListener(() => {
-  void setIcon("blue");
+chrome.runtime.onInstalled.addListener(() => void setIcon("blue"));
+chrome.runtime.onStartup.addListener(() => {
+  void enqueue(async () => {
+    await clearSession();
+    await setIcon("blue");
+  });
 });
 
-chrome.runtime.onStartup.addListener(async () => {
-  await clearSession();
-  await setIcon("blue");
+chrome.webNavigation.onCommitted.addListener(({ tabId, frameId }) => {
+  if (frameId !== 0) return;
+  if (activeRequest?.tabId === tabId) activeRequest = undefined;
+  void enqueue(async () => {
+    const session = await loadSession();
+    if (session?.tabId !== tabId) return;
+    activeRequest = undefined;
+    await saveGuidanceRequest();
+  }).catch(console.error);
 });
 
-// ── Navigation tracking (only when ON + guiding) ──────────────
+function handleNavigation({ tabId, frameId, url }: chrome.webNavigation.WebNavigationFramedCallbackDetails) {
+  if (frameId !== 0 || !isInjectableUrl(url)) return;
+  if (activeRequest?.tabId === tabId && activeRequest.pageUrl !== url) activeRequest = undefined;
 
-chrome.webNavigation.onCompleted.addListener(async (details) => {
-  if (details.frameId !== 0) return;
-  if (!isInjectableUrl(details.url)) return;
+  void enqueue(async () => {
+    const session = await loadSession();
+    if (!session?.on || !session.guiding || session.tabId !== tabId) return;
+    const tab = await chrome.tabs.get(tabId).catch(() => null);
+    if (tab?.url !== url || (tab.pendingUrl && tab.pendingUrl !== url)) return;
+    if (activeRequest?.tabId === tabId && activeRequest.pageUrl === url) return;
+    await pushNavigation(tabId, new URL(url).origin);
+    await startGuidance(tabId, url, session.taskGoal, Boolean(session.contextProvided));
+  }).catch(console.error);
+}
 
-  const session = await loadSession();
-  if (!session || !session.on || !session.guiding) return;
+chrome.webNavigation.onCompleted.addListener(handleNavigation);
+chrome.webNavigation.onHistoryStateUpdated.addListener(handleNavigation);
+chrome.webNavigation.onReferenceFragmentUpdated.addListener(handleNavigation);
 
-  try {
-    const origin = new URL(details.url).origin;
-    await pushNavigation(details.tabId, origin);
-    const tab = await chrome.tabs.get(details.tabId).catch(() => null);
-    await startAiGuidanceOnTab(
-      details.tabId,
-      details.url,
-      session.taskGoal,
-      tab?.windowId
-    );
-  } catch {
-    // Tab may have closed or restricted
-  }
-});
-
-chrome.webNavigation.onHistoryStateUpdated.addListener(async (details) => {
-  if (details.frameId !== 0) return;
-  if (!isInjectableUrl(details.url)) return;
-
-  const session = await loadSession();
-  if (!session || !session.on || !session.guiding) return;
-
-  const prev = spaDebounceTimers.get(details.tabId);
-  if (prev) clearTimeout(prev);
-
-  const timer = setTimeout(async () => {
-    spaDebounceTimers.delete(details.tabId);
-    const latest = await loadSession();
-    if (!latest || !latest.on || !latest.guiding) return;
-    try {
-      const tab = await chrome.tabs.get(details.tabId).catch(() => null);
-      await startAiGuidanceOnTab(
-        details.tabId,
-        details.url,
-        latest.taskGoal,
-        tab?.windowId
-      );
-    } catch {
-      // Ignore if tab gone
-    }
-  }, 650);
-
-  spaDebounceTimers.set(details.tabId, timer);
+chrome.tabs.onRemoved.addListener((tabId) => {
+  if (activeRequest?.tabId === tabId) activeRequest = undefined;
+  void enqueue(async () => {
+    const session = await loadSession();
+    if (session?.tabId !== tabId) return;
+    await clearSession();
+    await setIcon("blue");
+  }).catch(console.error);
 });

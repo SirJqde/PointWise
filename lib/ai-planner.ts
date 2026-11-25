@@ -6,7 +6,7 @@
 // decisions and produce strictly grounded action plans.
 // ============================================================
 
-import type { Plan, ScrubbedSnapshot, SnapshotElement, Step } from "./types.js";
+import type { GuidanceFailure, Plan, ScrubbedSnapshot, SnapshotElement, Step } from "./types.js";
 
 const GEMINI_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash"] as const;
 
@@ -70,6 +70,7 @@ export async function runAiPlanner(options: AgentRunOptions): Promise<Plan> {
       taskGoal: options.taskGoal,
       steps: [],
       error: "Gemini API key is required for AI page guidance. Add it in ⚙ API Key.",
+      recovery: "api-key",
     };
   }
 
@@ -86,7 +87,10 @@ export async function runAiPlanner(options: AgentRunOptions): Promise<Plan> {
     { role: "user", parts: [{ text: initialPrompt }] },
   ];
 
-  let lastError = "Unable to reach Gemini AI";
+  let failure: GuidanceFailure = {
+    message: "Gemini couldn’t prepare a plan. Try again.",
+    recovery: "retry",
+  };
 
   for (const model of GEMINI_MODELS) {
     const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
@@ -110,14 +114,21 @@ export async function runAiPlanner(options: AgentRunOptions): Promise<Plan> {
         });
 
         if (res.status === 404) {
-          lastError = `Model ${model} unavailable (404)`;
           modelUnavailable = true;
           break;
         }
 
         if (!res.ok) {
-          const errBody = await res.text().catch(() => "");
-          throw new Error(`Gemini API ${res.status}: ${errBody.slice(0, 120)}`);
+          const body = res.status === 400 ? await res.text().catch(() => "") : "";
+          if (res.status === 401 || res.status === 403 || /API_KEY_INVALID|API key not valid/i.test(body)) {
+            failure = {
+              message: "Gemini rejected the API key or its permissions. Update it in the PointWise popup, then try again.",
+              recovery: "api-key",
+            };
+          } else if (res.status === 429) {
+            failure.message = "Gemini’s request limit was reached. Wait a moment, then try again.";
+          }
+          break;
         }
 
         const json = (await res.json()) as {
@@ -136,6 +147,7 @@ export async function runAiPlanner(options: AgentRunOptions): Promise<Plan> {
               taskGoal: options.taskGoal,
               steps: [],
               error: "No interactive elements were found on this page yet.",
+              recovery: "rescan",
             };
           }
 
@@ -197,6 +209,7 @@ export async function runAiPlanner(options: AgentRunOptions): Promise<Plan> {
               taskGoal: options.taskGoal,
               steps: [],
               error: "No interactive elements found on this page.",
+              recovery: "rescan",
             };
           }
 
@@ -238,9 +251,9 @@ export async function runAiPlanner(options: AgentRunOptions): Promise<Plan> {
           taskGoal: options.taskGoal,
           steps: [],
           error: "Could not find matching interactive elements for this task on the page.",
+          recovery: "rescan",
         };
-      } catch (err) {
-        lastError = err instanceof Error ? err.message : String(err);
+      } catch {
         break;
       }
     }
@@ -252,7 +265,8 @@ export async function runAiPlanner(options: AgentRunOptions): Promise<Plan> {
   return {
     taskGoal: options.taskGoal,
     steps: [],
-    error: lastError,
+    error: failure.message,
+    recovery: failure.recovery,
   };
 }
 

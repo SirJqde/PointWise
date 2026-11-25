@@ -5,6 +5,8 @@
 // ============================================================
 
 import type {
+  GuidanceFailure,
+  GuidanceRequest,
   SearchResultItem,
   SessionGraph,
   SessionNode,
@@ -22,37 +24,18 @@ export async function loadSession(): Promise<SessionGraph | null> {
   return graph ?? null;
 }
 
-export async function setPowerOn(
-  taskGoal = "",
-  guiding = false,
-  resetContext = false
-): Promise<SessionGraph> {
+export async function setPowerOn(): Promise<void> {
   const existing = await loadSession();
-  const goalChanged = Boolean(taskGoal && existing?.taskGoal && taskGoal !== existing.taskGoal);
-
-  const graph: SessionGraph = existing
-    ? {
-        ...existing,
-        on: true,
-        guiding: guiding || existing.guiding,
-        taskGoal: taskGoal || existing.taskGoal,
-      }
-    : {
-        id: uid(),
-        on: true,
-        guiding,
-        taskGoal,
-        nodes: [],
-        createdAt: Date.now(),
-      };
-
-  if (resetContext || goalChanged) {
-    delete graph.contextProvided;
-    delete graph.contextQuestion;
-  }
-
+  if (existing?.on) return;
+  const graph: SessionGraph = {
+    id: uid(),
+    on: true,
+    guiding: false,
+    taskGoal: "",
+    nodes: [],
+    createdAt: Date.now(),
+  };
   await chrome.storage.session.set({ [SESSION_STORAGE_KEY]: graph });
-  return graph;
 }
 
 export async function saveSearchResults(
@@ -63,16 +46,37 @@ export async function saveSearchResults(
   if (!existing || !existing.on) return;
   existing.lastQuery = lastQuery;
   existing.lastResults = lastResults;
-  existing.taskGoal = lastQuery;
-  delete existing.contextProvided;
-  delete existing.contextQuestion;
   await chrome.storage.session.set({ [SESSION_STORAGE_KEY]: existing });
 }
 
-export async function setContextQuestion(question: string): Promise<void> {
+export async function saveGuidanceRequest(request?: GuidanceRequest): Promise<void> {
+  const graph = await loadSession();
+  if (!graph?.on) return;
+  if (request) {
+    graph.request = request;
+    const node = graph.nodes.at(-1);
+    if (node) node.stepIndex = 0;
+  } else {
+    delete graph.request;
+  }
+  delete graph.contextQuestion;
+  delete graph.contextRequestId;
+  delete graph.guidanceFailure;
+  await chrome.storage.session.set({ [SESSION_STORAGE_KEY]: graph });
+}
+
+export async function saveGuidanceFailure(failure: GuidanceFailure): Promise<void> {
+  const graph = await loadSession();
+  if (!graph?.on) return;
+  graph.guidanceFailure = failure;
+  await chrome.storage.session.set({ [SESSION_STORAGE_KEY]: graph });
+}
+
+export async function setContextQuestion(question: string, requestId: string): Promise<void> {
   const existing = await loadSession();
   if (!existing || !existing.on) return;
   existing.contextQuestion = question;
+  existing.contextRequestId = requestId;
   await chrome.storage.session.set({ [SESSION_STORAGE_KEY]: existing });
 }
 
@@ -88,6 +92,7 @@ export async function applyContextAnswer(answer: string): Promise<SessionGraph |
   }
   existing.contextProvided = true;
   delete existing.contextQuestion;
+  delete existing.contextRequestId;
   await chrome.storage.session.set({ [SESSION_STORAGE_KEY]: existing });
   return existing;
 }
@@ -95,8 +100,7 @@ export async function applyContextAnswer(answer: string): Promise<SessionGraph |
 export async function createSession(
   taskGoal: string,
   tabId: number,
-  origin: string,
-  resetContext = false
+  origin: string
 ): Promise<SessionGraph> {
   const existing = await loadSession();
   const node: SessionNode = {
@@ -106,18 +110,16 @@ export async function createSession(
     timestamp: Date.now(),
   };
   const graph: SessionGraph = {
-    id: existing?.id ?? uid(),
+    id: uid(),
     on: true,
     guiding: true,
+    tabId,
     taskGoal: taskGoal || existing?.taskGoal || "",
     nodes: [node],
     createdAt: existing?.createdAt ?? Date.now(),
   };
   if (existing?.lastQuery !== undefined) graph.lastQuery = existing.lastQuery;
   if (existing?.lastResults !== undefined) graph.lastResults = existing.lastResults;
-  if (!resetContext && existing?.contextProvided !== undefined) {
-    graph.contextProvided = existing.contextProvided;
-  }
   await chrome.storage.session.set({ [SESSION_STORAGE_KEY]: graph });
   return graph;
 }
@@ -127,13 +129,12 @@ export async function pushNavigation(
   origin: string
 ): Promise<SessionGraph | null> {
   const graph = await loadSession();
-  if (!graph || !graph.on) return null;
+  if (!graph?.on || graph.tabId !== tabId) return null;
 
-  const last = graph.nodes.at(-1);
   const node: SessionNode = {
     tabId,
     origin,
-    stepIndex: last?.stepIndex ?? 0,
+    stepIndex: 0,
     timestamp: Date.now(),
   };
   graph.nodes.push(node);
@@ -145,7 +146,7 @@ export async function advanceStep(stepIndex: number): Promise<void> {
   const graph = await loadSession();
   if (!graph || !graph.on) return;
   const last = graph.nodes.at(-1);
-  if (last) last.stepIndex = stepIndex;
+  if (last) last.stepIndex = Math.max(last.stepIndex, stepIndex);
   await chrome.storage.session.set({ [SESSION_STORAGE_KEY]: graph });
 }
 
