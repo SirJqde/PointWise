@@ -1,18 +1,12 @@
 // ============================================================
 // PointWise — Popup Controller
 //
-// UX Flow:
-//   Power OFF → ONLY PointWise title + power switch visible
-//   Power ON  → prompt dialogue + Search button open
-//   Results   → ONLY clickable link + validity score per card
-//   Click link→ opens website, minimizes UI, and triggers AI flow
-// ============================================================
-
 import {
   searchWebIntent,
   type SearchResultItem,
 } from "../lib/router.js";
 import { loadSession } from "../lib/session-graph.js";
+import { getStoredApiKey } from "../lib/ai-planner.js";
 import type { ExtMessage } from "../lib/types.js";
 
 // ── Refs ──────────────────────────────────────────────────────
@@ -26,6 +20,9 @@ const contextSubmitBtn = q("context-submit-btn") as HTMLButtonElement;
 const contextSkipBtn   = q("context-skip-btn") as HTMLButtonElement;
 const activePanel      = q("active-panel");
 const taskInput        = q("task-input") as HTMLTextAreaElement;
+const guideBtn         = q("guide-btn") as HTMLButtonElement;
+const actionStatus     = q("action-status");
+const retryBtn         = q("retry-btn") as HTMLButtonElement;
 const searchBtn        = q("search-btn") as HTMLButtonElement;
 const resultsContainer = q("results-container");
 const keyBtn           = q("key-btn") as HTMLButtonElement;
@@ -40,33 +37,44 @@ function q(id: string): HTMLElement {
 // ── State ─────────────────────────────────────────────────────
 let isOn = false;
 let contextRequestId: string | undefined;
+let retryRequestId: string | undefined;
+let busy = false;
+let powerChanging = false;
 
 // ── Init — restore API key + persistent power session ────────
 chrome.storage.local.get("gc_api_key", (r) => {
   if (r["gc_api_key"]) apiKeyInput.value = r["gc_api_key"] as string;
 });
 
-void restoreSession();
+void restoreSession().catch(() => renderOffState());
 
 async function restoreSession(): Promise<void> {
   const session = await loadSession();
   if (session?.on) {
     isOn = true;
-    const restoredPrompt = session.lastQuery || session.taskGoal;
+    const restoredPrompt = session.taskGoal || session.lastQuery || "";
     if (restoredPrompt) {
       taskInput.value = restoredPrompt;
     }
     if (session.lastResults && session.lastResults.length > 0) {
-      renderResults(session.lastResults);
+      renderResults(session.lastResults, session.lastQuery ?? restoredPrompt);
     }
 
-    if (session.contextQuestion) {
+    if (session.contextQuestion && session.contextRequestId) {
       contextRequestId = session.contextRequestId;
       renderContextPromptState(session.contextQuestion);
       return;
     }
 
     renderOnState(false);
+    if (session.guidanceFailure && session.request) {
+      retryRequestId = session.request.id;
+      setStatus(session.guidanceFailure.message);
+      retryBtn.textContent = session.guidanceFailure.recovery === "rescan"
+        ? "Re-scan this page" : "Try again";
+      retryBtn.classList.remove("hidden");
+      if (session.guidanceFailure.recovery === "api-key") openKeySettings();
+    }
   } else {
     isOn = false;
     renderOffState();
@@ -75,32 +83,22 @@ async function restoreSession(): Promise<void> {
 
 // ── Standard Power Switch ─────────────────────────────────────
 powerSwitch.addEventListener("click", async () => {
-  if (isOn) {
-    await turnOff();
-  } else {
-    await turnOn();
+  if (busy || powerChanging) return;
+  powerChanging = true;
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: isOn ? "TOGGLE_OFF" : "ENABLE_SEARCH",
+    } satisfies ExtMessage);
+    if (!response?.ok) throw new Error();
+    isOn = !isOn;
+    if (isOn) renderOnState(true);
+    else renderOffState();
+  } catch {
+    setStatus("Could not change PointWise power. Try again.");
+  } finally {
+    powerChanging = false;
   }
 });
-
-async function turnOn(): Promise<void> {
-  await chrome.runtime.sendMessage({ type: "ENABLE_SEARCH" } satisfies ExtMessage);
-  isOn = true;
-
-  renderOnState(true);
-}
-
-async function turnOff(): Promise<void> {
-  isOn = false;
-
-
-  try {
-    await chrome.runtime.sendMessage({ type: "TOGGLE_OFF" } satisfies ExtMessage);
-  } catch {
-    /* SW wakes automatically */
-  }
-
-  renderOffState();
-}
 
 // ── UI State Renderers ────────────────────────────────────────
 
@@ -149,6 +147,9 @@ function renderOffState(): void {
   contextPanel.classList.add("hidden");
   activePanel.classList.add("hidden");
   resultsContainer.classList.add("hidden");
+  retryBtn.classList.add("hidden");
+  retryRequestId = undefined;
+  setStatus("");
 }
 
 // ── Additional Context Submission ─────────────────────────────
@@ -172,54 +173,86 @@ async function submitContext(skip: boolean): Promise<void> {
   contextAnswer.classList.remove("error");
 
   contextSubmitBtn.disabled = true;
-  await chrome.runtime
+  contextSkipBtn.disabled = true;
+  const response = await chrome.runtime
     .sendMessage({ type: "CONTEXT_SUBMITTED", answer, requestId: contextRequestId } satisfies ExtMessage)
-    .catch(() => {});
-
-  window.close();
+    .catch(() => null);
+  if (response?.ok) {
+    window.close();
+  } else if (response?.skipped) {
+    renderOnState(false);
+    setStatus("The page changed. Choose Guide this page to start again.");
+  } else {
+    contextQuestion.textContent = "Could not send your answer. Try again.";
+  }
+  contextSubmitBtn.disabled = false;
+  contextSkipBtn.disabled = false;
 }
 
-// ── Web Search Bar (only available when ON) ───────────────────
-searchBtn.addEventListener("click", doSearch);
+guideBtn.addEventListener("click", () => void startOnCurrentPage());
+searchBtn.addEventListener("click", () => void doSearch());
+retryBtn.addEventListener("click", () => {
+  if (retryRequestId) void startGuidance({ type: "RESCAN", requestId: retryRequestId });
+});
 taskInput.addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && !e.shiftKey) {
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
     e.preventDefault();
     void doSearch();
   }
 });
+taskInput.addEventListener("input", () => taskInput.classList.remove("error"));
+
+function readTask(): string {
+  const task = taskInput.value.trim();
+  taskInput.classList.toggle("error", !task);
+  if (!task) {
+    setStatus("Enter what you want to do.");
+    taskInput.focus();
+  }
+  return task;
+}
+
+function setBusy(value: boolean): void {
+  busy = value;
+  guideBtn.disabled = value;
+  searchBtn.disabled = value;
+  powerSwitch.disabled = value;
+  retryBtn.disabled = value;
+}
+
+function setStatus(message: string): void {
+  actionStatus.textContent = message;
+  actionStatus.classList.toggle("hidden", !message);
+}
+
+async function startOnCurrentPage(): Promise<void> {
+  if (!isOn || busy || powerChanging) return;
+  const taskGoal = readTask();
+  if (taskGoal) await startGuidance({ type: "TOGGLE_ON", taskGoal });
+}
 
 async function doSearch(): Promise<void> {
-  if (!isOn) return;
+  if (!isOn || busy || powerChanging) return;
+  const task = readTask();
+  if (!task) return;
 
-  const task = taskInput.value.trim();
-  if (!task) {
-    taskInput.classList.add("error");
-    taskInput.focus();
-    return;
-  }
-  taskInput.classList.remove("error");
-
-  searchBtn.disabled = true;
+  setBusy(true);
   searchBtn.textContent = "Searching…";
-
-  const response = await searchWebIntent(task);
-
-  searchBtn.disabled = false;
-  searchBtn.textContent = "Search";
-
-  await chrome.runtime.sendMessage({
-    type: "SAVE_SEARCH_RESULTS", query: task, results: response.results,
-  } satisfies ExtMessage);
-
-  if (response.results.length === 0) {
-    renderNoResults(
-      response.warnings[0] ??
-        "No results found. Try clearer keywords or a website domain."
-    );
-    return;
+  setStatus("");
+  resultsContainer.classList.add("hidden");
+  try {
+    const response = await searchWebIntent(task);
+    await chrome.runtime.sendMessage({
+      type: "SAVE_SEARCH_RESULTS", query: task, results: response.results,
+    } satisfies ExtMessage).catch(() => {});
+    if (response.results.length > 0) renderResults(response.results, task);
+    else renderNoResults(response.warnings[0] ?? "No results found. Try different keywords.");
+  } catch {
+    renderNoResults("Search couldn’t finish. Try again, or open a website and choose Guide this page.");
+  } finally {
+    searchBtn.textContent = "Search for a site";
+    setBusy(false);
   }
-
-  renderResults(response.results);
 }
 
 function renderNoResults(msg: string): void {
@@ -227,8 +260,8 @@ function renderNoResults(msg: string): void {
   resultsContainer.classList.remove("hidden");
 }
 
-// ── Render Minimal Search Results (Link + Validity ONLY) ──────
-function renderResults(items: SearchResultItem[]): void {
+// ── Search results ──────────────────────────────────────────
+function renderResults(items: SearchResultItem[], taskGoal: string): void {
   resultsContainer.innerHTML = "";
 
   for (const item of items) {
@@ -248,15 +281,14 @@ function renderResults(items: SearchResultItem[]): void {
     `;
     link.onclick = (e) => {
       e.preventDefault();
-      if (!isOn) return;
-      void openAndStartGuidance(item.url);
+      void startGuidance({ type: "TOGGLE_ON", taskGoal: taskGoal || "Complete my task on this site", targetUrl: item.url });
     };
     card.appendChild(link);
 
     // 2. Validity score + badge
     const score = item.validityScore;
     const badgeText =
-      score >= 70 ? "✅ Valid" : score >= 45 ? "⚠️ Unconfirmed" : "🚫 Low Trust";
+      score >= 70 ? "Strong signals" : score >= 45 ? "Mixed signals" : "Weak signals";
     const badgeCls = score >= 70 ? "" : score >= 45 ? " warn" : " block";
     const scoreColor =
       score >= 70 ? "var(--verified)" : score >= 45 ? "var(--warn)" : "var(--danger)";
@@ -265,7 +297,7 @@ function renderResults(items: SearchResultItem[]): void {
     validityRow.className = "result-validity";
     validityRow.innerHTML = `
       <span class="result-badge${badgeCls}">${badgeText}</span>
-      <div class="score-wrap" title="Website Validity Score">
+      <div class="score-wrap" title="Estimated site rating">
         <div class="score-track">
           <div class="score-fill" style="width:${score}%;background:${scoreColor}"></div>
         </div>
@@ -274,26 +306,49 @@ function renderResults(items: SearchResultItem[]): void {
     `;
     card.appendChild(validityRow);
 
+    const reason = document.createElement("p");
+    reason.className = "result-reason";
+    const checks = [
+      ["Live HTTPS", "Site responded over HTTPS."],
+      ["DNS", "Domain resolved."],
+      ["TLS / CT", "Certificate check passed."],
+    ];
+    const passedChecks = checks
+      .filter(([name]) => item.signals?.some((signal) => signal.name === name && signal.passed))
+      .map(([, label]) => label);
+    const warning = item.warnings?.[0];
+    reason.textContent = [warning, ...passedChecks.slice(0, 2)]
+      .filter(Boolean).join(" ") || "Few verification signals were available.";
+    card.appendChild(reason);
+
     resultsContainer.appendChild(card);
   }
 
   resultsContainer.classList.remove("hidden");
 }
 
-// ── Open Chosen Link, Minimize UI & Trigger AI Flow ───────────
-async function openAndStartGuidance(targetUrl: string): Promise<void> {
-  if (!isOn) return;
-
-  const task = taskInput.value.trim() || `Complete task on ${targetUrl}`;
-  const response = await chrome.runtime
-    .sendMessage({ type: "TOGGLE_ON", taskGoal: task, targetUrl } satisfies ExtMessage)
-    .catch(() => ({ error: "Could not start guidance. Try again." }));
-  if (response?.error) {
-    renderNoResults(response.error);
-    return;
+async function startGuidance(message: Extract<ExtMessage, { type: "TOGGLE_ON" | "RESCAN" }>): Promise<void> {
+  if (!isOn || busy || powerChanging) return;
+  setBusy(true);
+  try {
+    if (!(await getStoredApiKey())) {
+      setStatus("Add a Gemini API key to start guidance.");
+      openKeySettings();
+      return;
+    }
+    const response = await chrome.runtime.sendMessage(message);
+    if (response?.ok) window.close();
+    else setStatus(response?.error ?? "The page changed. Choose Guide this page to start again.");
+  } catch {
+    setStatus("Could not start guidance. Try again.");
+  } finally {
+    setBusy(false);
   }
+}
 
-  window.close();
+function openKeySettings(): void {
+  keyRow.classList.remove("hidden");
+  apiKeyInput.focus();
 }
 
 // ── API key settings ──────────────────────────────────────────
@@ -301,12 +356,17 @@ keyBtn.addEventListener("click", () => keyRow.classList.toggle("hidden"));
 
 saveKeyBtn.addEventListener("click", async () => {
   const key = apiKeyInput.value.trim();
-  if (!key) {
-    await chrome.storage.local.remove("gc_api_key");
-  } else {
-    await chrome.storage.local.set({ gc_api_key: key });
+  try {
+    if (!key) {
+      await chrome.storage.local.remove("gc_api_key");
+    } else {
+      await chrome.storage.local.set({ gc_api_key: key });
+    }
+    keyRow.classList.add("hidden");
+    setStatus(key ? "API key saved. You can start or retry guidance." : "API key removed.");
+  } catch {
+    setStatus("Could not save the API key change. Try again.");
   }
-  keyRow.classList.add("hidden");
 });
 
 function escapeHtml(s: string): string {

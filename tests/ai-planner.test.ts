@@ -37,6 +37,7 @@ const SAMPLE_SNAPSHOT: ScrubbedSnapshot = {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe("normalizeAndGroundSteps", () => {
@@ -78,6 +79,7 @@ describe("runAiPlanner — AI-only guidePage & grounding", () => {
     expect(guidePageSpy).not.toHaveBeenCalled();
     expect(plan.steps).toHaveLength(0);
     expect(plan.error).toContain("API key");
+    expect(plan.recovery).toBe("api-key");
     expect(JSON.stringify(plan)).not.toContain("Local match");
   });
 
@@ -254,6 +256,20 @@ describe("runAiPlanner — AI-only guidePage & grounding", () => {
     });
 
     expect(plan.steps).toHaveLength(0);
-    expect(plan.error).toContain("403");
+    expect(plan.error).toContain("API key");
+    expect(plan.recovery).toBe("api-key");
+  });
+
+  it("offers retry guidance when Gemini rate-limits the request", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("Upstream error detail", { status: 429 })));
+    const plan = await runAiPlanner({
+      taskGoal: "Test a page",
+      apiKeyOverride: "test-key",
+      guidePage: vi.fn(async () => SAMPLE_SNAPSHOT),
+    });
+    expect(plan.steps).toHaveLength(0);
+    expect(plan.error).toContain("request limit");
+    expect(plan.error).not.toContain("Upstream error detail");
+    expect(plan.recovery).toBe("retry");
   });
 });

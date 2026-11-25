@@ -5,13 +5,14 @@ import {
   createSession,
   loadSession,
   pushNavigation,
+  saveGuidanceFailure,
   saveGuidanceRequest,
   saveSearchResults,
   setContextQuestion,
   setPowerOn,
 } from "../lib/session-graph.js";
 import { runAiPlanner } from "../lib/ai-planner.js";
-import type { ExtMessage, GuidanceRequest, ScrubbedSnapshot } from "../lib/types.js";
+import type { ExtMessage, GuidanceFailure, GuidanceRequest, ScrubbedSnapshot } from "../lib/types.js";
 
 let activeRequest: GuidanceRequest | undefined;
 let commandQueue: Promise<unknown> = loadSession().then((session) => {
@@ -29,7 +30,7 @@ chrome.runtime.onMessage.addListener((msg: ExtMessage, sender, sendResponse) => 
     .then(sendResponse)
     .catch((err) => {
       console.error("[PointWise SW]", err);
-      sendResponse({ error: String(err) });
+      sendResponse({ error: "PointWise couldn’t complete that action. Try again." });
     });
   return true;
 });
@@ -56,16 +57,23 @@ async function handleMessage(msg: ExtMessage, sender: chrome.runtime.MessageSend
       };
 
     case "TOGGLE_ON": {
-      if (!session?.on || sender.tab || !isInjectableUrl(msg.targetUrl)) {
-        return { error: "Turn PointWise on and choose an HTTP or HTTPS page." };
+      if (!session?.on || sender.tab || !msg.taskGoal.trim()) {
+        return { error: "Turn PointWise on and enter a task." };
       }
 
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      const requestedUrl = msg.targetUrl ?? tab?.url;
+      if (!requestedUrl || !isInjectableUrl(requestedUrl)) {
+        return { error: "Open a website in this tab, then choose Guide this page." };
+      }
+      if (!msg.targetUrl && (tab?.status !== "complete" || tab.pendingUrl)) {
+        return { error: "Wait for this page to finish loading, then try again." };
+      }
+      const targetUrl = new URL(requestedUrl).href;
       const previousTab = session.tabId;
       activeRequest = undefined;
       if (previousTab !== undefined) await stopOverlay(previousTab);
 
-      const targetUrl = new URL(msg.targetUrl).href;
       const selectedTab = tab?.id === undefined
         ? await chrome.tabs.create({ active: true })
         : tab;
@@ -101,9 +109,17 @@ async function handleMessage(msg: ExtMessage, sender: chrome.runtime.MessageSend
       if (msg.type === "STEP_COMPLETE") {
         if (sender.tab) await advanceStep(msg.stepIndex + 1);
       } else if (msg.type === "RESCAN") {
-        if (sender.tab) await startGuidance(request.tabId, request.pageUrl, session.taskGoal,
+        if (!sender.tab) {
+          const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+          if (tab?.id !== request.tabId || tab.url !== request.pageUrl || tab.pendingUrl ||
+              activeRequest !== request) {
+            return { error: "Return to the tab you were guiding, then try again." };
+          }
+        }
+        await startGuidance(request.tabId, request.pageUrl, session.taskGoal,
           Boolean(session.contextProvided));
-      } else if (session.contextRequestId === request.id) {
+      } else {
+        if (session.contextRequestId !== request.id) return { skipped: true };
         const updated = await applyContextAnswer(msg.answer);
         if (updated && activeRequest === request) {
           await startGuidance(request.tabId, request.pageUrl, updated.taskGoal, true);
@@ -122,7 +138,26 @@ async function startGuidance(tabId: number, pageUrl: string, taskGoal: string, c
   activeRequest = request;
   await saveGuidanceRequest(request);
   if (activeRequest !== request) return;
-  void runGuidance(request, taskGoal, contextProvided).catch(console.error);
+  void runGuidance(request, taskGoal, contextProvided).catch((error) => {
+    console.error("[PointWise guidance]", error);
+    return enqueue(() => publishFailure(request, {
+      message: "PointWise couldn’t start guidance on this page. Reload the page and try again.",
+      recovery: "retry",
+    }));
+  }).catch(console.error);
+}
+
+async function publishFailure(request: GuidanceRequest, failure: GuidanceFailure): Promise<void> {
+  if (activeRequest !== request) return;
+  const tab = await chrome.tabs.get(request.tabId).catch(() => null);
+  if (activeRequest !== request || tab?.url !== request.pageUrl || tab.pendingUrl) return;
+
+  await saveGuidanceFailure(failure);
+  if (activeRequest === request) {
+    await chrome.tabs.sendMessage(request.tabId, {
+      type: "PLAN_ERROR", requestId: request.id, ...failure,
+    } satisfies ExtMessage, { frameId: 0 }).catch(() => {});
+  }
 }
 
 async function runGuidance(
@@ -143,7 +178,8 @@ async function runGuidance(
   const activated = await chrome.tabs.sendMessage(tabId, {
     type: "GUIDANCE_START", requestId, pageUrl,
   } satisfies ExtMessage, target);
-  if (!activated?.ok || activeRequest !== request) return;
+  if (activeRequest !== request) return;
+  if (!activated?.ok) throw new Error("The page did not activate the guidance overlay.");
 
   const plan = await runAiPlanner({
     taskGoal,
@@ -174,10 +210,11 @@ async function runGuidance(
       }
       message = { type: "CONTEXT_REQUIRED", requestId, question: plan.clarifyingQuestion, popupOpened };
     } else if (plan.error || plan.steps.length === 0) {
-      message = {
-        type: "PLAN_ERROR", requestId,
+      await publishFailure(request, {
         message: plan.error ?? "No matching actionable steps found on this page.",
-      };
+        recovery: plan.recovery ?? "rescan",
+      });
+      return;
     } else {
       message = { type: "PLAN_READY", requestId, plan };
     }

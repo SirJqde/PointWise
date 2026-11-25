@@ -23,6 +23,14 @@ export interface Plan {
   needsContext?: boolean;
   clarifyingQuestion?: string;
   error?: string;
+  recovery?: GuidanceRecovery;
+}
+
+export type GuidanceRecovery = "api-key" | "retry" | "rescan";
+
+export interface GuidanceFailure {
+  message: string;
+  recovery: GuidanceRecovery;
 }
 
 export interface SessionNode {
@@ -77,6 +85,7 @@ export interface SessionGraph {
   guiding: boolean;
   tabId?: number;
   request?: GuidanceRequest;
+  guidanceFailure?: GuidanceFailure;
   taskGoal: string;
   contextProvided?: boolean;
   contextQuestion?: string;
@@ -112,7 +121,7 @@ export type ExtMessage =
   | { type: "GET_SESSION_STATE" }
   | { type: "ENABLE_SEARCH" }
   | { type: "SAVE_SEARCH_RESULTS"; query: string; results: SearchResultItem[] }
-  | { type: "TOGGLE_ON"; taskGoal: string; targetUrl: string }
+  | { type: "TOGGLE_ON"; taskGoal: string; targetUrl?: string }
   | { type: "TOGGLE_OFF" }
   | { type: "GUIDANCE_START"; requestId: string; pageUrl: string }
   | { type: "COLLECT_SNAPSHOT"; requestId: string }
@@ -120,5 +129,5 @@ export type ExtMessage =
   | { type: "CONTEXT_REQUIRED"; requestId: string; question: string; popupOpened: boolean }
   | { type: "CONTEXT_SUBMITTED"; answer: string; requestId: string }
   | { type: "PLAN_READY"; requestId: string; plan: Plan }
-  | { type: "PLAN_ERROR"; requestId: string; message: string }
+  | ({ type: "PLAN_ERROR"; requestId: string } & GuidanceFailure)
   | { type: "STEP_COMPLETE"; requestId: string; stepIndex: number };

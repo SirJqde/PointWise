@@ -82,7 +82,9 @@ function initPointWiseContent(): void {
 
       case "PLAN_ERROR":
         if (!isCurrent(msg.requestId) || !overlay) return false;
-        overlay.showNotice(msg.message, true);
+        overlay.showNotice(
+          msg.message, true, false, msg.recovery === "rescan" ? "Re-scan this page" : "Try again"
+        );
         sendResponse({ ok: true });
         return false;
 

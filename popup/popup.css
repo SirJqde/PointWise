@@ -282,6 +282,18 @@ textarea.error        { border-color: var(--danger); }
   color: var(--text);
 }
 
+.secondary-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.action-status,
+.result-reason {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--muted);
+}
+
+.action-status { padding: 8px 12px 0; }
+
 /* ── Minimal Results Container (Link + Validity ONLY) ─────── */
 .results-container {
   display: flex;

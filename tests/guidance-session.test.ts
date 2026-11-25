@@ -31,6 +31,7 @@ function mockChrome() {
     [2, { id: 2, url: nextUrl, status: "complete", active: false }],
   ]);
   const sendMessage = vi.fn(async (_tabId: number, _message: ExtMessage) => ({ ok: true }));
+  const update = vi.fn().mockResolvedValue(undefined);
   vi.stubGlobal("chrome", {
     storage: {
       session: {
@@ -46,7 +47,7 @@ function mockChrome() {
     tabs: {
       get: async (id: number) => tabs.get(id),
       query: async () => [tabs.get(1)],
-      update: vi.fn().mockResolvedValue(undefined),
+      update,
       sendMessage,
       onRemoved: event(),
     },
@@ -61,6 +62,7 @@ function mockChrome() {
   return {
     tabs,
     sendMessage,
+    update,
     completed,
     get session() { return session; },
     send: (message: ExtMessage, sender: chrome.runtime.MessageSender = {}) =>
@@ -82,6 +84,61 @@ describe("guidance session", () => {
   });
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it("guides the current tab without navigating when no search result is supplied", async () => {
+    const browser = mockChrome();
+    await import("../background/service-worker.js");
+    await browser.send({ type: "ENABLE_SEARCH" });
+    const result = await browser.send({ type: "TOGGLE_ON", taskGoal: "Read this page" });
+    expect(result).toEqual({ ok: true });
+    expect(browser.update).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(planner).toHaveBeenCalledWith(expect.objectContaining({
+      taskGoal: "Read this page", pageUrl: firstUrl,
+    })));
+  });
+
+  it("still navigates to a chosen search result in the selected tab", async () => {
+    const browser = mockChrome();
+    await import("../background/service-worker.js");
+    await browser.send({ type: "ENABLE_SEARCH" });
+    await browser.send({ type: "TOGGLE_ON", taskGoal: "Task", targetUrl: nextUrl });
+    expect(browser.update).toHaveBeenCalledWith(1, { url: nextUrl });
+    expect(planner).not.toHaveBeenCalled();
+    browser.tabs.get(1)!.url = nextUrl;
+    browser.completed.handler({ tabId: 1, frameId: 0, url: nextUrl });
+    await vi.waitFor(() => expect(planner).toHaveBeenCalledWith(expect.objectContaining({
+      taskGoal: "Task", pageUrl: nextUrl,
+    })));
+  });
+
+  it("explains why the active browser settings page cannot be guided", async () => {
+    const browser = mockChrome();
+    browser.tabs.get(1)!.url = "chrome://settings/";
+    await import("../background/service-worker.js");
+    await browser.send({ type: "ENABLE_SEARCH" });
+    expect(await browser.send({ type: "TOGGLE_ON", taskGoal: "Change a setting" }))
+      .toEqual({ error: expect.stringContaining("Open a website") });
+    expect(browser.session?.guiding).toBe(false);
+    expect(planner).not.toHaveBeenCalled();
+  });
+
+  it("keeps the task available when a plan fails and retries it from the popup", async () => {
+    const browser = mockChrome();
+    planner.mockResolvedValueOnce({
+      taskGoal: "Task", steps: [], error: "Gemini couldn’t prepare a plan.", recovery: "retry",
+    });
+    await import("../background/service-worker.js");
+    await start(browser);
+    await vi.waitFor(() => expect(browser.session?.guidanceFailure?.recovery).toBe("retry"));
+    const requestId = browser.session?.request?.id;
+    expect(requestId).toBeDefined();
+    expect(await browser.send({ type: "RESCAN", requestId: requestId! })).toEqual({ ok: true });
+    await vi.waitFor(() => expect(planner).toHaveBeenCalledTimes(2));
+    expect(planner).toHaveBeenLastCalledWith(expect.objectContaining({
+      taskGoal: "Task", pageUrl: firstUrl,
+    }));
+    expect(browser.session?.guidanceFailure).toBeUndefined();
   });
 
   it("ignores navigation in an unrelated tab", async () => {

@@ -5,6 +5,7 @@
 // ============================================================
 
 import type {
+  GuidanceFailure,
   GuidanceRequest,
   SearchResultItem,
   SessionGraph,
@@ -60,6 +61,14 @@ export async function saveGuidanceRequest(request?: GuidanceRequest): Promise<vo
   }
   delete graph.contextQuestion;
   delete graph.contextRequestId;
+  delete graph.guidanceFailure;
+  await chrome.storage.session.set({ [SESSION_STORAGE_KEY]: graph });
+}
+
+export async function saveGuidanceFailure(failure: GuidanceFailure): Promise<void> {
+  const graph = await loadSession();
+  if (!graph?.on) return;
+  graph.guidanceFailure = failure;
   await chrome.storage.session.set({ [SESSION_STORAGE_KEY]: graph });
 }
 

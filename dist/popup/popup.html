@@ -4,9 +4,10 @@
   <meta charset="UTF-8" />
   <title>PointWise</title>
   <script type="module" crossorigin src="/assets/modulepreload-polyfill-B5Qt9EMX.js"></script>
-  <script type="module" crossorigin src="/assets/session-graph-CyNejS8Y.js"></script>
-  <script type="module" crossorigin src="/assets/popup-VxqqOrUr.js"></script>
-  <link rel="stylesheet" crossorigin href="/assets/popup-CY2KH6qU.css">
+  <script type="module" crossorigin src="/assets/session-graph-k4RBgznn.js"></script>
+  <script type="module" crossorigin src="/assets/ai-planner-BozH5HlU.js"></script>
+  <script type="module" crossorigin src="/assets/popup-BKSsrvFR.js"></script>
+  <link rel="stylesheet" crossorigin href="/assets/popup-p6OOsZRi.css">
 </head>
 <body>
 
@@ -38,6 +39,7 @@
       </button>
     </div>
   </header>
+  <p id="action-status" class="action-status hidden" role="status"></p>
 
   <!-- Context follow-up panel: opens automatically if AI needs more details -->
   <section id="context-panel" class="context-panel hidden">
@@ -63,16 +65,19 @@
       placeholder="e.g. Apply for a BMTC bus pass&#10;Book a train ticket from Delhi to Agra&#10;Renew driving licence"
     ></textarea>
 
-    <button id="search-btn" class="search-btn" type="button">Search</button>
+    <div class="action-row">
+      <button id="guide-btn" class="search-btn" type="button">Guide this page</button>
+      <button id="search-btn" class="secondary-btn" type="button">Search for a site</button>
+    </div>
+    <button id="retry-btn" class="secondary-btn hidden" type="button">Try again</button>
 
-    <!-- Minimal search results: ONLY link + validity -->
     <div id="results-container" class="results-container hidden"></div>
 
     <!-- Footer / Gemini API key settings -->
     <footer>
       <button id="key-btn" class="key-btn" type="button" title="Configure Gemini API key">⚙ API Key</button>
       <div id="key-row" class="key-row hidden">
-        <input type="password" id="api-key" placeholder="AIzaSy…" autocomplete="off" />
+        <input type="password" id="api-key" aria-label="Gemini API key" placeholder="Gemini API key" autocomplete="off" />
         <button id="save-key" class="save-key-btn" type="button">Save</button>
       </div>
     </footer>
