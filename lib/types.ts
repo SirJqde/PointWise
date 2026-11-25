@@ -65,13 +65,22 @@ export interface WebSearchResponse {
   warnings: string[];
 }
 
+export interface GuidanceRequest {
+  id: string;
+  tabId: number;
+  pageUrl: string;
+}
+
 export interface SessionGraph {
   id: string;
   on: boolean;
   guiding: boolean;
+  tabId?: number;
+  request?: GuidanceRequest;
   taskGoal: string;
   contextProvided?: boolean;
   contextQuestion?: string;
+  contextRequestId?: string;
   lastQuery?: string;
   lastResults?: SearchResultItem[];
   nodes: SessionNode[];
@@ -101,15 +110,15 @@ export interface SnapshotElement {
 export type ExtMessage =
   | { type: "PING" }
   | { type: "GET_SESSION_STATE" }
-  | { type: "TOGGLE_ON"; taskGoal: string; resetContext?: boolean }
+  | { type: "ENABLE_SEARCH" }
+  | { type: "SAVE_SEARCH_RESULTS"; query: string; results: SearchResultItem[] }
+  | { type: "TOGGLE_ON"; taskGoal: string; targetUrl: string }
   | { type: "TOGGLE_OFF" }
-  | { type: "COLLECT_SNAPSHOT"; taskGoal: string }
-  | { type: "SNAPSHOT_READY"; snapshot: ScrubbedSnapshot; taskGoal?: string }
-  | { type: "CONTEXT_REQUIRED"; question: string; popupOpened: boolean }
-  | { type: "CONTEXT_SUBMITTED"; answer: string }
-  | { type: "PLAN_READY"; plan: Plan }
-  | { type: "PLAN_ERROR"; message: string }
-  | { type: "STEP_COMPLETE"; stepIndex: number }
-  | { type: "USER_WITHDREW" }
-  | { type: "USER_RESUMED" }
-  | { type: "SESSION_NAV"; origin: string };
+  | { type: "GUIDANCE_START"; requestId: string; pageUrl: string }
+  | { type: "COLLECT_SNAPSHOT"; requestId: string }
+  | { type: "RESCAN"; requestId: string }
+  | { type: "CONTEXT_REQUIRED"; requestId: string; question: string; popupOpened: boolean }
+  | { type: "CONTEXT_SUBMITTED"; answer: string; requestId: string }
+  | { type: "PLAN_READY"; requestId: string; plan: Plan }
+  | { type: "PLAN_ERROR"; requestId: string; message: string }
+  | { type: "STEP_COMPLETE"; requestId: string; stepIndex: number };

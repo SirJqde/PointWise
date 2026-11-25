@@ -12,12 +12,7 @@ import {
   searchWebIntent,
   type SearchResultItem,
 } from "../lib/router.js";
-import {
-  clearSession,
-  loadSession,
-  saveSearchResults,
-  setPowerOn,
-} from "../lib/session-graph.js";
+import { loadSession } from "../lib/session-graph.js";
 import type { ExtMessage } from "../lib/types.js";
 
 // ── Refs ──────────────────────────────────────────────────────
@@ -44,6 +39,7 @@ function q(id: string): HTMLElement {
 
 // ── State ─────────────────────────────────────────────────────
 let isOn = false;
+let contextRequestId: string | undefined;
 
 // ── Init — restore API key + persistent power session ────────
 chrome.storage.local.get("gc_api_key", (r) => {
@@ -65,6 +61,7 @@ async function restoreSession(): Promise<void> {
     }
 
     if (session.contextQuestion) {
+      contextRequestId = session.contextRequestId;
       renderContextPromptState(session.contextQuestion);
       return;
     }
@@ -86,11 +83,8 @@ powerSwitch.addEventListener("click", async () => {
 });
 
 async function turnOn(): Promise<void> {
+  await chrome.runtime.sendMessage({ type: "ENABLE_SEARCH" } satisfies ExtMessage);
   isOn = true;
-  const existingTask = taskInput.value.trim();
-
-  await setPowerOn(existingTask, false);
-  await setActionIcon("green");
 
   renderOnState(true);
 }
@@ -98,8 +92,6 @@ async function turnOn(): Promise<void> {
 async function turnOff(): Promise<void> {
   isOn = false;
 
-  await clearSession();
-  await setActionIcon("blue");
 
   try {
     await chrome.runtime.sendMessage({ type: "TOGGLE_OFF" } satisfies ExtMessage);
@@ -170,7 +162,7 @@ contextAnswer.addEventListener("keydown", (e) => {
 });
 
 async function submitContext(skip: boolean): Promise<void> {
-  if (!isOn) return;
+  if (!isOn || !contextRequestId) return;
   const answer = skip ? "" : contextAnswer.value.trim();
   if (!skip && !answer) {
     contextAnswer.classList.add("error");
@@ -181,7 +173,7 @@ async function submitContext(skip: boolean): Promise<void> {
 
   contextSubmitBtn.disabled = true;
   await chrome.runtime
-    .sendMessage({ type: "CONTEXT_SUBMITTED", answer } satisfies ExtMessage)
+    .sendMessage({ type: "CONTEXT_SUBMITTED", answer, requestId: contextRequestId } satisfies ExtMessage)
     .catch(() => {});
 
   window.close();
@@ -215,7 +207,9 @@ async function doSearch(): Promise<void> {
   searchBtn.disabled = false;
   searchBtn.textContent = "Search";
 
-  await saveSearchResults(task, response.results);
+  await chrome.runtime.sendMessage({
+    type: "SAVE_SEARCH_RESULTS", query: task, results: response.results,
+  } satisfies ExtMessage);
 
   if (response.results.length === 0) {
     renderNoResults(
@@ -291,42 +285,15 @@ async function openAndStartGuidance(targetUrl: string): Promise<void> {
   if (!isOn) return;
 
   const task = taskInput.value.trim() || `Complete task on ${targetUrl}`;
-  await setPowerOn(task, true, true);
-
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (tab?.id) {
-    const targetNorm = targetUrl.replace(/\/$/, "");
-    const currentNorm = (tab.url ?? "").replace(/\/$/, "");
-    if (currentNorm === targetNorm) {
-      await chrome.runtime
-        .sendMessage({
-          type: "TOGGLE_ON",
-          taskGoal: task,
-          resetContext: true,
-        } satisfies ExtMessage)
-        .catch(() => {});
-    } else {
-      await chrome.tabs.update(tab.id, { url: targetUrl });
-    }
-  } else {
-    await chrome.tabs.create({ url: targetUrl });
+  const response = await chrome.runtime
+    .sendMessage({ type: "TOGGLE_ON", taskGoal: task, targetUrl } satisfies ExtMessage)
+    .catch(() => ({ error: "Could not start guidance. Try again." }));
+  if (response?.error) {
+    renderNoResults(response.error);
+    return;
   }
 
   window.close();
-}
-
-// ── Icon helper ───────────────────────────────────────────────
-async function setActionIcon(state: "green" | "blue"): Promise<void> {
-  const suffix = state === "green" ? "-green" : "-blue";
-  await chrome.action
-    .setIcon({
-      path: {
-        "16": `assets/icons/icon16${suffix}.png`,
-        "48": `assets/icons/icon48${suffix}.png`,
-        "128": `assets/icons/icon128${suffix}.png`,
-      },
-    })
-    .catch(() => {});
 }
 
 // ── API key settings ──────────────────────────────────────────

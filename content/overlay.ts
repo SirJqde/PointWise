@@ -296,7 +296,7 @@ export class CursorOverlay {
     await this.pointAtElement(target, options);
   }
 
-  showNotice(message: string, isError = false): void {
+  showNotice(message: string, isError = false, canSkip = false): void {
     this.clearTargetVisuals();
     this.cursorDialogue.style.display = "none";
     this.miniDock.style.display = "none";
@@ -310,6 +310,7 @@ export class CursorOverlay {
       <div class="${isError ? "pw-error" : "pw-hint"}">${escapeHtml(message)}</div>
       <div class="pw-actions">
         <button class="pw-btn pw-btn-primary" data-pw-action="rescan">Re-scan ↻</button>
+        ${canSkip ? '<button class="pw-btn" data-pw-action="next">Skip step</button>' : ""}
         <button class="pw-btn" data-pw-action="dismiss">Hide</button>
       </div>
     `;
