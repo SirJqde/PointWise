@@ -522,7 +522,7 @@ const SHADOW_TEMPLATE = `
     pointer-events: none;
     transition: transform 460ms cubic-bezier(.22,1,.36,1), opacity 180ms ease;
     z-index: 2147483647;
-    filter: drop-shadow(0 0 6px rgba(212, 38, 126, 0.55)) drop-shadow(0 2px 4px rgba(7, 11, 26, 0.65));
+    filter: drop-shadow(0 2px 4px rgba(15, 23, 42, .28));
     display: none;
     opacity: 0;
     will-change: transform, opacity;
@@ -535,27 +535,9 @@ const SHADOW_TEMPLATE = `
     z-index: 2147483644;
     border-radius: 8px;
     display: none;
-    border: 2px solid #d4267e;
-    background: rgba(212, 38, 126, 0.08);
-    box-shadow:
-      0 0 0 2px rgba(14, 22, 48, 0.5),
-      0 0 12px 2px rgba(212, 38, 126, 0.42),
-      inset 0 0 8px rgba(212, 38, 126, 0.1);
-    animation: pw-ring-pulse 1.8s ease-in-out infinite;
-  }
-  @keyframes pw-ring-pulse {
-    0%, 100% {
-      box-shadow:
-        0 0 0 2px rgba(14, 22, 48, 0.5),
-        0 0 10px 1px rgba(212, 38, 126, 0.36),
-        inset 0 0 8px rgba(212, 38, 126, 0.09);
-    }
-    50% {
-      box-shadow:
-        0 0 0 4px rgba(212, 38, 126, 0.16),
-        0 0 18px 3px rgba(212, 38, 126, 0.58),
-        inset 0 0 12px rgba(212, 38, 126, 0.14);
-    }
+    border: 2px solid #1d4ed8;
+    background: rgba(29, 78, 216, 0.08);
+    box-shadow: 0 0 0 2px white, 0 0 0 4px rgba(29, 78, 216, .2);
   }
 
   /* ── Floating Step Tag over Target Element ────────────────── */
@@ -564,14 +546,14 @@ const SHADOW_TEMPLATE = `
     pointer-events: none;
     z-index: 2147483645;
     display: none;
-    background: linear-gradient(135deg, #d4267e, #a81c62);
+    background: #1d4ed8;
     color: #f4f7fc;
-    font: 700 10px/1.2 system-ui, -apple-system, sans-serif;
+    font: 700 10px/1.2 "Segoe UI", system-ui, sans-serif;
     letter-spacing: 0.08em;
     padding: 4px 8px;
     border-radius: 5px;
     border: 1px solid rgba(255, 255, 255, 0.22);
-    box-shadow: 0 2px 8px rgba(212, 38, 126, 0.35);
+    box-shadow: 0 2px 8px rgba(15, 23, 42, .18);
     white-space: nowrap;
   }
 
@@ -581,15 +563,14 @@ const SHADOW_TEMPLATE = `
     top: 0; left: 0;
     width: 268px;
     max-width: calc(100vw - 24px);
-    background: linear-gradient(165deg, rgba(16, 24, 52, 0.96) 0%, rgba(10, 15, 33, 0.97) 100%);
-    border: 1.5px solid rgba(212, 38, 126, 0.78);
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
     border-radius: 10px;
     padding: 10px 12px;
-    font: 12.5px/1.45 system-ui, -apple-system, sans-serif;
-    color: #e4eaf7;
+    font: 12.5px/1.45 "Segoe UI", system-ui, sans-serif;
+    color: #0f172a;
     box-shadow:
-      0 0 14px rgba(212, 38, 126, 0.24),
-      0 8px 22px rgba(6, 10, 24, 0.75);
+      0 8px 24px rgba(15, 23, 42, .16);
     display: none;
     z-index: 2147483647;
     pointer-events: none;
@@ -602,18 +583,18 @@ const SHADOW_TEMPLATE = `
     gap: 6px;
     margin-bottom: 6px;
     padding-bottom: 5px;
-    border-bottom: 1px solid rgba(212, 38, 126, 0.22);
+    border-bottom: 1px solid #e2e8f0;
   }
   .pw-cd-hint {
     font-size: 12.5px;
     font-weight: 600;
-    color: #edf1fb;
+    color: #0f172a;
     line-height: 1.4;
   }
   .pw-cd-sub {
     margin-top: 5px;
     font-size: 10.5px;
-    color: #8b9bc0;
+    color: #64748b;
   }
 
   /* ── Anchored Plan / Context Card (interactive) ───────────── */
@@ -622,15 +603,14 @@ const SHADOW_TEMPLATE = `
     top: 80px; left: 80px;
     width: 336px;
     max-width: calc(100vw - 24px);
-    background: linear-gradient(165deg, #111a36 0%, #0a0f21 100%);
-    border: 1.5px solid rgba(212, 38, 126, 0.78);
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
     border-radius: 12px;
     padding: 13px 15px;
-    font: 13px/1.5 system-ui, -apple-system, sans-serif;
-    color: #e4eaf7;
+    font: 13px/1.5 "Segoe UI", system-ui, sans-serif;
+    color: #0f172a;
     box-shadow:
-      0 0 16px rgba(212, 38, 126, 0.24),
-      0 12px 30px rgba(6, 10, 24, 0.85);
+      0 12px 30px rgba(15, 23, 42, .16);
     display: none;
     z-index: 2147483647;
     pointer-events: auto;
@@ -643,17 +623,17 @@ const SHADOW_TEMPLATE = `
     display: none;
     align-items: center;
     gap: 6px;
-    background: rgba(14, 21, 44, 0.94);
-    border: 1px solid #2c3d70;
+    background: #f8fafc;
+    border: 1px solid #cbd5e1;
     border-radius: 10px;
     padding: 6px 8px;
-    box-shadow: 0 4px 16px rgba(6, 10, 24, 0.7);
+    box-shadow: 0 4px 16px rgba(15, 23, 42, .14);
     z-index: 2147483646;
     pointer-events: auto;
-    font: 11px/1 system-ui, -apple-system, sans-serif;
+    font: 11px/1 "Segoe UI", system-ui, sans-serif;
   }
   .pw-dock-label {
-    color: #ea78b2;
+    color: #1e40af;
     font-weight: 700;
     font-size: 11px;
     padding: 0 4px;
@@ -667,33 +647,33 @@ const SHADOW_TEMPLATE = `
     gap: 8px;
     margin-bottom: 8px;
     padding-bottom: 7px;
-    border-bottom: 1px solid rgba(212, 38, 126, 0.22);
+    border-bottom: 1px solid #e2e8f0;
   }
   .pw-brand {
     font-size: 10px;
     font-weight: 800;
     letter-spacing: 0.11em;
-    color: #ea78b2;
+    color: #1e40af;
   }
   .pw-pill {
     font-size: 9.5px;
     font-weight: 700;
     letter-spacing: 0.06em;
-    color: #c5d1f0;
-    background: #172245;
-    border: 1px solid #2c3d70;
+    color: #334155;
+    background: #f1f5f9;
+    border: 1px solid #cbd5e1;
     padding: 2px 7px;
     border-radius: 99px;
   }
   .pw-pill-err {
-    color: #f6b8c4;
+    color: #991b1b;
     background: rgba(229, 108, 130, 0.16);
     border-color: rgba(229, 108, 130, 0.45);
   }
 
   .pw-plan-goal {
     font-size: 11.5px;
-    color: #8b9bc0;
+    color: #64748b;
     margin-bottom: 9px;
   }
   .pw-plan-list {
@@ -708,15 +688,15 @@ const SHADOW_TEMPLATE = `
     display: flex;
     align-items: flex-start;
     gap: 8px;
-    background: rgba(23, 34, 69, 0.78);
-    border: 1px solid #273766;
+    background: #f1f5f9;
+    border: 1px solid #e2e8f0;
     border-radius: 8px;
     padding: 7px 9px;
   }
   .pw-plan-num {
     width: 18px; height: 18px;
     border-radius: 50%;
-    background: #d4267e;
+    background: #1d4ed8;
     color: #f4f7fc;
     font-size: 10.5px;
     font-weight: 800;
@@ -729,12 +709,12 @@ const SHADOW_TEMPLATE = `
   .pw-plan-text {
     font-size: 12px;
     line-height: 1.4;
-    color: #e4eaf7;
+    color: #0f172a;
   }
   .pw-confirm-ask {
     font-size: 11.5px;
     font-weight: 600;
-    color: #ea78b2;
+    color: #1e40af;
     margin-bottom: 2px;
   }
 
@@ -743,17 +723,17 @@ const SHADOW_TEMPLATE = `
     font-size: 13px;
     font-weight: 500;
     line-height: 1.5;
-    color: #edf1fb;
+    color: #0f172a;
   }
   .pw-subnote {
     margin-top: 6px;
     font-size: 11.5px;
     line-height: 1.4;
-    color: #ea78b2;
+    color: #1e40af;
   }
   .pw-error {
     margin-top: 6px;
-    color: #f095a6;
+    color: #991b1b;
     font-size: 12px;
     line-height: 1.45;
   }
@@ -762,16 +742,16 @@ const SHADOW_TEMPLATE = `
     width: 100%;
     box-sizing: border-box;
     margin-top: 8px;
-    background: #0d142b;
-    border: 1.5px solid #2c3d70;
+    background: #ffffff;
+    border: 1.5px solid #cbd5e1;
     border-radius: 8px;
-    color: #e4eaf7;
-    font: 12.5px/1.4 system-ui, -apple-system, sans-serif;
+    color: #0f172a;
+    font: 12.5px/1.4 "Segoe UI", system-ui, sans-serif;
     padding: 8px 10px;
     outline: none;
   }
   .pw-input:focus {
-    border-color: #d4267e;
+    border-color: #1d4ed8;
   }
 
   .pw-actions {
@@ -781,18 +761,18 @@ const SHADOW_TEMPLATE = `
     margin-top: 10px;
   }
   .pw-btn {
-    font: 600 11px/1 system-ui, -apple-system, sans-serif;
+    font: 600 11px/1 "Segoe UI", system-ui, sans-serif;
     padding: 8px 11px;
     border-radius: 7px;
     cursor: pointer;
-    border: 1px solid #2c3d70;
-    background: #172245;
-    color: #cbd5ea;
+    border: 1px solid #cbd5e1;
+    background: #f1f5f9;
+    color: #334155;
     transition: all 140ms ease;
   }
   .pw-btn:hover {
-    border-color: #d4267e;
-    color: #edf1fb;
+    border-color: #1d4ed8;
+    color: #0f172a;
   }
   .pw-btn-sm {
     padding: 6px 8px;
@@ -800,15 +780,20 @@ const SHADOW_TEMPLATE = `
   }
   .pw-btn-primary {
     flex: 1;
-    background: linear-gradient(135deg, #d4267e, #b01d67);
-    border-color: #d4267e;
+    background: #1d4ed8;
+    border-color: #1d4ed8;
     color: #f4f7fc;
     font-weight: 700;
-    box-shadow: 0 0 8px rgba(212, 38, 126, 0.28);
   }
   .pw-btn-primary:hover {
-    background: linear-gradient(135deg, #e03e8f, #c22575);
-    border-color: #e03e8f;
+    color: white;
+    background: #1e40af;
+    border-color: #1e40af;
+  }
+
+  .pw-btn:focus-visible, .pw-input:focus-visible {
+    outline: 2px solid #1d4ed8;
+    outline-offset: 2px;
   }
 
   .pw-scanning {
@@ -816,14 +801,13 @@ const SHADOW_TEMPLATE = `
     align-items: center;
     gap: 8px;
     font-size: 12px;
-    color: #ea78b2;
+    color: #1e40af;
     font-weight: 600;
   }
   .pw-scan-dot {
     width: 8px; height: 8px;
     border-radius: 50%;
-    background: #d4267e;
-    box-shadow: 0 0 6px rgba(212, 38, 126, 0.6);
+    background: #1d4ed8;
     animation: pw-scan-blink 1s ease infinite;
     flex-shrink: 0;
   }
@@ -838,9 +822,9 @@ const SHADOW_TEMPLATE = `
     align-items: flex-start;
   }
   .pw-pause-icon { font-size: 20px; flex-shrink: 0; }
-  .pw-pause-body { font-size: 12.5px; line-height: 1.5; color: #dce3f2; }
+  .pw-pause-body { font-size: 12.5px; line-height: 1.5; color: #0f172a; }
   .pw-pause-title {
-    color: #ea78b2;
+    color: #1e40af;
     font-weight: 700;
     font-size: 11px;
     letter-spacing: .06em;
@@ -849,11 +833,11 @@ const SHADOW_TEMPLATE = `
   }
 </style>
 
-<!-- Ghost cursor SVG (Deep Navy + Refined Magenta pointer, tip at 5,3) -->
+<!-- Ghost cursor SVG (Blue pointer, tip at 5,3) -->
 <svg id="pw-cursor" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <path d="M5 3L27 14.5L15.8 17.2L10.5 28L5 3Z" fill="rgba(212, 38, 126, 0.2)"/>
-  <path d="M5 3L25.5 14L15.3 16.5L10.5 26.5L5 3Z" fill="#0d142b" stroke="#d4267e" stroke-width="2" stroke-linejoin="round"/>
-  <path d="M8.5 7.5L20.5 14L14.2 15.8L11 22.5L8.5 7.5Z" fill="#d4267e" fill-opacity="0.45"/>
+  <path d="M5 3L27 14.5L15.8 17.2L10.5 28L5 3Z" fill="rgba(29, 78, 216, 0.2)"/>
+  <path d="M5 3L25.5 14L15.3 16.5L10.5 26.5L5 3Z" fill="#ffffff" stroke="#1d4ed8" stroke-width="2" stroke-linejoin="round"/>
+  <path d="M8.5 7.5L20.5 14L14.2 15.8L11 22.5L8.5 7.5Z" fill="#1d4ed8" fill-opacity="0.45"/>
 </svg>
 
 <!-- Highlight ring around target element -->

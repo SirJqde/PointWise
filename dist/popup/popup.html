@@ -1,87 +1,69 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>PointWise</title>
   <script type="module" crossorigin src="/assets/modulepreload-polyfill-B5Qt9EMX.js"></script>
-  <script type="module" crossorigin src="/assets/session-graph-k4RBgznn.js"></script>
   <script type="module" crossorigin src="/assets/ai-planner-BozH5HlU.js"></script>
-  <script type="module" crossorigin src="/assets/popup-BKSsrvFR.js"></script>
-  <link rel="stylesheet" crossorigin href="/assets/popup-p6OOsZRi.css">
+  <script type="module" crossorigin src="/assets/session-graph-k4RBgznn.js"></script>
+  <script type="module" crossorigin src="/assets/popup-ChTRf6Av.js"></script>
+  <link rel="stylesheet" crossorigin href="/assets/popup-6wDYJs8C.css">
 </head>
 <body>
-
-  <!-- Header: ONLY PointWise + power switch visible initially when OFF -->
-  <header id="app-header">
-    <div class="logo-wrap">
-      <span class="logo">⬡</span>
-      <h1>PointWise</h1>
-    </div>
-    <div class="header-right">
-      <span id="status-indicator" class="status-indicator dormant" title="PointWise is Off"></span>
-      <button
-        id="power-switch"
-        class="power-switch"
-        type="button"
-        role="switch"
-        aria-checked="false"
-        aria-label="Toggle PointWise power"
-        title="Turn PointWise ON"
-      >
-        <span class="switch-track">
-          <span class="switch-thumb">
-            <svg class="power-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round">
-              <path d="M12 3v8" />
-              <path d="M18.36 6.64a9 9 0 1 1-12.73 0" />
-            </svg>
-          </span>
-        </span>
-      </button>
+  <header class="header">
+    <h1>PointWise</h1>
+    <div class="header-actions">
+      <button id="settings-btn" class="text-button" type="button" aria-controls="settings-panel" aria-expanded="false">Settings</button>
+      <button id="power-switch" class="switch" type="button" role="switch" aria-checked="false" aria-label="PointWise"></button>
     </div>
   </header>
-  <p id="action-status" class="action-status hidden" role="status"></p>
+  <main>
+    <p id="off-panel" class="muted">Turn on PointWise to get guidance on a page.</p>
 
-  <!-- Context follow-up panel: opens automatically if AI needs more details -->
-  <section id="context-panel" class="context-panel hidden">
-    <div class="context-badge">NEED MORE CONTEXT</div>
-    <p id="context-question" class="context-question"></p>
-    <textarea
-      id="context-answer"
-      rows="3"
-      placeholder="Add details (e.g. Student pass, Pune to Mumbai, or item name)…"
-    ></textarea>
-    <div class="action-row">
-      <button id="context-submit-btn" class="search-btn" type="button">Continue ▶</button>
-      <button id="context-skip-btn" class="secondary-btn" type="button">Skip</button>
-    </div>
-  </section>
-
-  <!-- Active panel: prompt dialogue, search bar & minimal link results ONLY open once turned ON -->
-  <section id="active-panel" class="active-panel hidden">
-    <label for="task-input" class="prompt-label">What do you want to do?</label>
-    <textarea
-      id="task-input"
-      rows="3"
-      placeholder="e.g. Apply for a BMTC bus pass&#10;Book a train ticket from Delhi to Agra&#10;Renew driving licence"
-    ></textarea>
-
-    <div class="action-row">
-      <button id="guide-btn" class="search-btn" type="button">Guide this page</button>
-      <button id="search-btn" class="secondary-btn" type="button">Search for a site</button>
-    </div>
-    <button id="retry-btn" class="secondary-btn hidden" type="button">Try again</button>
-
-    <div id="results-container" class="results-container hidden"></div>
-
-    <!-- Footer / Gemini API key settings -->
-    <footer>
-      <button id="key-btn" class="key-btn" type="button" title="Configure Gemini API key">⚙ API Key</button>
-      <div id="key-row" class="key-row hidden">
-        <input type="password" id="api-key" aria-label="Gemini API key" placeholder="Gemini API key" autocomplete="off" />
-        <button id="save-key" class="save-key-btn" type="button">Save</button>
+    <section id="task-panel" hidden>
+      <div class="modes" role="group" aria-label="How to start">
+        <button id="page-mode" type="button" aria-pressed="true">Current page</button>
+        <button id="search-mode" type="button" aria-pressed="false">Find a website</button>
       </div>
-    </footer>
-  </section>
+      <p id="page-context" class="muted page-context"></p>
+      <form id="task-form" class="task-form">
+        <label for="task-input">What do you want to do?</label>
+        <textarea id="task-input" rows="2" placeholder="Find the search box and look up Bengaluru"></textarea>
+        <button id="start-btn" class="primary-button" type="submit">Guide this page</button>
+      </form>
+    </section>
 
+    <form id="context-panel" class="panel-form" hidden>
+      <label id="context-question" for="context-answer"></label>
+      <textarea id="context-answer" rows="2" placeholder="Add a little more detail"></textarea>
+      <div class="button-row">
+        <button id="context-submit" class="primary-button" type="submit">Continue</button>
+        <button id="context-skip" class="text-button" type="button">Skip</button>
+      </div>
+    </form>
+
+    <section id="settings-panel" hidden>
+      <div class="section-heading">
+        <h2>Settings</h2>
+        <button id="settings-back" class="text-button" type="button">Back</button>
+      </div>
+      <form id="key-form" class="panel-form">
+        <label for="api-key">Gemini API key</label>
+        <p id="key-help" class="muted">Used for AI guidance and saved in this browser.</p>
+        <input type="password" id="api-key" aria-describedby="key-help" autocomplete="off">
+        <button class="primary-button" type="submit">Save key</button>
+      </form>
+    </section>
+
+    <div id="status-row" class="status-row" hidden>
+      <p id="status-message" role="status" aria-live="polite"></p>
+      <button id="status-action" class="text-button" type="button" hidden></button>
+    </div>
+    <section id="results-section" class="results" aria-label="Website results" hidden>
+      <h2 id="results-heading"></h2>
+      <ul id="results-list"></ul>
+    </section>
+  </main>
 </body>
 </html>

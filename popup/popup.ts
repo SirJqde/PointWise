@@ -1,378 +1,374 @@
-// ============================================================
-// PointWise — Popup Controller
-//
-import {
-  searchWebIntent,
-  type SearchResultItem,
-} from "../lib/router.js";
-import { loadSession } from "../lib/session-graph.js";
 import { getStoredApiKey } from "../lib/ai-planner.js";
-import type { ExtMessage } from "../lib/types.js";
+import { searchWebIntent, type SearchResultItem } from "../lib/router.js";
+import { loadSession } from "../lib/session-graph.js";
+import type { ExtMessage, GuidanceFailure } from "../lib/types.js";
 
-// ── Refs ──────────────────────────────────────────────────────
-const appHeader        = q("app-header");
-const powerSwitch      = q("power-switch") as HTMLButtonElement;
-const statusIndicator  = q("status-indicator");
-const contextPanel     = q("context-panel");
-const contextQuestion  = q("context-question");
-const contextAnswer    = q("context-answer") as HTMLTextAreaElement;
-const contextSubmitBtn = q("context-submit-btn") as HTMLButtonElement;
-const contextSkipBtn   = q("context-skip-btn") as HTMLButtonElement;
-const activePanel      = q("active-panel");
-const taskInput        = q("task-input") as HTMLTextAreaElement;
-const guideBtn         = q("guide-btn") as HTMLButtonElement;
-const actionStatus     = q("action-status");
-const retryBtn         = q("retry-btn") as HTMLButtonElement;
-const searchBtn        = q("search-btn") as HTMLButtonElement;
-const resultsContainer = q("results-container");
-const keyBtn           = q("key-btn") as HTMLButtonElement;
-const keyRow           = q("key-row");
-const apiKeyInput      = q("api-key") as HTMLInputElement;
-const saveKeyBtn       = q("save-key") as HTMLButtonElement;
-
-function q(id: string): HTMLElement {
-  return document.getElementById(id) as HTMLElement;
+function element<T extends HTMLElement = HTMLElement>(id: string): T {
+  return document.getElementById(id) as T;
 }
 
-// ── State ─────────────────────────────────────────────────────
-let isOn = false;
-let contextRequestId: string | undefined;
-let retryRequestId: string | undefined;
+const power = element<HTMLButtonElement>("power-switch");
+const settings = element<HTMLButtonElement>("settings-btn");
+const settingsBack = element<HTMLButtonElement>("settings-back");
+const taskPanel = element("task-panel");
+const contextPanel = element<HTMLFormElement>("context-panel");
+const contextQuestion = element("context-question");
+const contextAnswer = element<HTMLTextAreaElement>("context-answer");
+const task = element<HTMLTextAreaElement>("task-input");
+const pageMode = element<HTMLButtonElement>("page-mode");
+const searchMode = element<HTMLButtonElement>("search-mode");
+const start = element<HTMLButtonElement>("start-btn");
+const resultsSection = element("results-section");
+const resultsList = element("results-list");
+const statusRow = element("status-row");
+const statusAction = element<HTMLButtonElement>("status-action");
+const key = element<HTMLInputElement>("api-key");
+
+type Mode = "page" | "search";
+type Notice = { message: string; error?: boolean; action?: { label: string; run: () => void } };
+type StartMessage = Extract<ExtMessage, { type: "TOGGLE_ON" | "RESCAN" }>;
+
+let mode: Mode = "page";
+let on = false;
 let busy = false;
-let powerChanging = false;
+let settingsOpen = false;
+let contextRequestId: string | undefined;
+let activeTab: chrome.tabs.Tab | undefined;
+let pageNotice: Notice | undefined;
+let searchNotice: Notice | undefined;
+let settingsNotice: Notice | undefined;
+let contextNotice: Notice | undefined;
+let powerNotice: Notice | undefined;
+let resultCount = 0;
+let retryAfterKey: StartMessage | undefined;
 
-// ── Init — restore API key + persistent power session ────────
-chrome.storage.local.get("gc_api_key", (r) => {
-  if (r["gc_api_key"]) apiKeyInput.value = r["gc_api_key"] as string;
-});
+function pageSite(): string {
+  const url = activeTab?.url;
+  return url && /^https?:\/\//.test(url) ? new URL(url).hostname : "";
+}
 
-void restoreSession().catch(() => renderOffState());
+function showNotice(notice?: Notice): void {
+  const message = element("status-message");
+  if (message.textContent !== (notice?.message ?? "")) message.textContent = notice?.message ?? "";
+  statusRow.hidden = !notice;
+  statusRow.dataset.error = String(Boolean(notice?.error));
+  statusAction.hidden = !notice?.action;
+  statusAction.textContent = notice?.action?.label ?? "";
+  statusAction.onclick = notice?.action?.run ?? null;
+}
 
-async function restoreSession(): Promise<void> {
-  const session = await loadSession();
-  if (session?.on) {
-    isOn = true;
-    const restoredPrompt = session.taskGoal || session.lastQuery || "";
-    if (restoredPrompt) {
-      taskInput.value = restoredPrompt;
+function render(): void {
+  const asking = on && Boolean(contextRequestId);
+  power.setAttribute("aria-checked", String(on));
+  settings.setAttribute("aria-expanded", String(settingsOpen));
+  element("off-panel").hidden = on || settingsOpen;
+  element("settings-panel").hidden = !settingsOpen;
+  taskPanel.hidden = !on || asking || settingsOpen;
+  contextPanel.hidden = !asking || settingsOpen;
+  resultsSection.hidden = taskPanel.hidden || mode !== "search" || resultCount === 0;
+  pageMode.setAttribute("aria-pressed", String(mode === "page"));
+  searchMode.setAttribute("aria-pressed", String(mode === "search"));
+
+  const site = pageSite();
+  element("page-context").textContent = mode === "search"
+    ? "Find a site for your task."
+    : site ? `On ${site}` : "Open a website in this tab to use current-page guidance.";
+  start.textContent = busy
+    ? mode === "search" ? "Searching…" : "Starting…"
+    : mode === "search" ? "Find websites" : "Guide this page";
+  showNotice(settingsOpen ? settingsNotice : !on ? powerNotice : asking ? contextNotice
+    : mode === "page" ? pageNotice : searchNotice);
+}
+
+function selectMode(next: Mode): void {
+  if (busy) return;
+  mode = next;
+  task.removeAttribute("aria-invalid");
+  render();
+}
+
+function openSettings(): void {
+  settingsOpen = true;
+  settingsNotice = undefined;
+  render();
+  key.focus();
+}
+
+function closeSettings(): void {
+  settingsOpen = false;
+  render();
+  settings.focus();
+}
+
+function recoveryNotice(failure: GuidanceFailure, requestId: string): Notice {
+  return {
+    message: failure.message,
+    error: true,
+    action: failure.recovery === "api-key"
+      ? { label: "Open settings", run: openSettings }
+      : {
+        label: failure.recovery === "rescan" ? "Re-scan" : "Try again",
+        run: () => void startGuidance({ type: "RESCAN", requestId }, "page"),
+      },
+  };
+}
+
+async function initialize(): Promise<void> {
+  const [session, tabs, savedKey] = await Promise.all([
+    loadSession(),
+    chrome.tabs.query({ active: true, currentWindow: true }),
+    getStoredApiKey(),
+  ]);
+  activeTab = tabs[0];
+  key.value = savedKey;
+  if (!session?.on) return;
+  on = true;
+  task.value = session.taskGoal || session.lastQuery || "";
+  if (session.lastResults?.length) renderResults(session.lastResults, session.lastQuery ?? task.value);
+  if (session.tabId === activeTab?.id && session.request?.pageUrl === activeTab?.url) {
+    if (session.guidanceFailure && session.request) {
+      pageNotice = recoveryNotice(session.guidanceFailure, session.request.id);
+      if (session.guidanceFailure.recovery === "api-key") {
+        retryAfterKey = { type: "RESCAN", requestId: session.request.id };
+      }
     }
-    if (session.lastResults && session.lastResults.length > 0) {
-      renderResults(session.lastResults, session.lastQuery ?? restoredPrompt);
-    }
-
     if (session.contextQuestion && session.contextRequestId) {
       contextRequestId = session.contextRequestId;
-      renderContextPromptState(session.contextQuestion);
-      return;
+      contextQuestion.textContent = session.contextQuestion;
     }
-
-    renderOnState(false);
-    if (session.guidanceFailure && session.request) {
-      retryRequestId = session.request.id;
-      setStatus(session.guidanceFailure.message);
-      retryBtn.textContent = session.guidanceFailure.recovery === "rescan"
-        ? "Re-scan this page" : "Try again";
-      retryBtn.classList.remove("hidden");
-      if (session.guidanceFailure.recovery === "api-key") openKeySettings();
-    }
-  } else {
-    isOn = false;
-    renderOffState();
   }
-}
-
-// ── Standard Power Switch ─────────────────────────────────────
-powerSwitch.addEventListener("click", async () => {
-  if (busy || powerChanging) return;
-  powerChanging = true;
-  try {
-    const response = await chrome.runtime.sendMessage({
-      type: isOn ? "TOGGLE_OFF" : "ENABLE_SEARCH",
-    } satisfies ExtMessage);
-    if (!response?.ok) throw new Error();
-    isOn = !isOn;
-    if (isOn) renderOnState(true);
-    else renderOffState();
-  } catch {
-    setStatus("Could not change PointWise power. Try again.");
-  } finally {
-    powerChanging = false;
-  }
-});
-
-// ── UI State Renderers ────────────────────────────────────────
-
-function renderOnState(focusInput: boolean): void {
-  powerSwitch.classList.add("on");
-  powerSwitch.setAttribute("aria-checked", "true");
-  powerSwitch.title = "Turn PointWise OFF";
-
-  statusIndicator.className = "status-indicator active";
-  statusIndicator.title = "PointWise is ON";
-
-  appHeader.classList.add("expanded");
-  contextPanel.classList.add("hidden");
-  activePanel.classList.remove("hidden");
-
-  if (focusInput) {
-    taskInput.focus();
-  }
-}
-
-function renderContextPromptState(question: string): void {
-  powerSwitch.classList.add("on");
-  powerSwitch.setAttribute("aria-checked", "true");
-  powerSwitch.title = "Turn PointWise OFF";
-
-  statusIndicator.className = "status-indicator active";
-  statusIndicator.title = "PointWise needs context";
-
-  appHeader.classList.add("expanded");
-  activePanel.classList.add("hidden");
-  contextQuestion.textContent = question;
-  contextAnswer.value = "";
-  contextPanel.classList.remove("hidden");
-  contextAnswer.focus();
-}
-
-function renderOffState(): void {
-  powerSwitch.classList.remove("on");
-  powerSwitch.setAttribute("aria-checked", "false");
-  powerSwitch.title = "Turn PointWise ON";
-
-  statusIndicator.className = "status-indicator dormant";
-  statusIndicator.title = "PointWise is OFF";
-
-  appHeader.classList.remove("expanded");
-  contextPanel.classList.add("hidden");
-  activePanel.classList.add("hidden");
-  resultsContainer.classList.add("hidden");
-  retryBtn.classList.add("hidden");
-  retryRequestId = undefined;
-  setStatus("");
-}
-
-// ── Additional Context Submission ─────────────────────────────
-contextSubmitBtn.addEventListener("click", () => void submitContext(false));
-contextSkipBtn.addEventListener("click", () => void submitContext(true));
-contextAnswer.addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && !e.shiftKey) {
-    e.preventDefault();
-    void submitContext(false);
-  }
-});
-
-async function submitContext(skip: boolean): Promise<void> {
-  if (!isOn || !contextRequestId) return;
-  const answer = skip ? "" : contextAnswer.value.trim();
-  if (!skip && !answer) {
-    contextAnswer.classList.add("error");
-    contextAnswer.focus();
-    return;
-  }
-  contextAnswer.classList.remove("error");
-
-  contextSubmitBtn.disabled = true;
-  contextSkipBtn.disabled = true;
-  const response = await chrome.runtime
-    .sendMessage({ type: "CONTEXT_SUBMITTED", answer, requestId: contextRequestId } satisfies ExtMessage)
-    .catch(() => null);
-  if (response?.ok) {
-    window.close();
-  } else if (response?.skipped) {
-    renderOnState(false);
-    setStatus("The page changed. Choose Guide this page to start again.");
-  } else {
-    contextQuestion.textContent = "Could not send your answer. Try again.";
-  }
-  contextSubmitBtn.disabled = false;
-  contextSkipBtn.disabled = false;
-}
-
-guideBtn.addEventListener("click", () => void startOnCurrentPage());
-searchBtn.addEventListener("click", () => void doSearch());
-retryBtn.addEventListener("click", () => {
-  if (retryRequestId) void startGuidance({ type: "RESCAN", requestId: retryRequestId });
-});
-taskInput.addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
-    e.preventDefault();
-    void doSearch();
-  }
-});
-taskInput.addEventListener("input", () => taskInput.classList.remove("error"));
-
-function readTask(): string {
-  const task = taskInput.value.trim();
-  taskInput.classList.toggle("error", !task);
-  if (!task) {
-    setStatus("Enter what you want to do.");
-    taskInput.focus();
-  }
-  return task;
 }
 
 function setBusy(value: boolean): void {
   busy = value;
-  guideBtn.disabled = value;
-  searchBtn.disabled = value;
-  powerSwitch.disabled = value;
-  retryBtn.disabled = value;
+  for (const button of [power, settings, pageMode, searchMode, start, statusAction]) button.disabled = value;
+  task.readOnly = value;
+  render();
 }
 
-function setStatus(message: string): void {
-  actionStatus.textContent = message;
-  actionStatus.classList.toggle("hidden", !message);
+function taskNotice(origin: Mode, notice?: Notice): void {
+  if (origin === "page") pageNotice = notice;
+  else searchNotice = notice;
+  render();
 }
 
-async function startOnCurrentPage(): Promise<void> {
-  if (!isOn || busy || powerChanging) return;
-  const taskGoal = readTask();
-  if (taskGoal) await startGuidance({ type: "TOGGLE_ON", taskGoal });
-}
-
-async function doSearch(): Promise<void> {
-  if (!isOn || busy || powerChanging) return;
-  const task = readTask();
-  if (!task) return;
-
-  setBusy(true);
-  searchBtn.textContent = "Searching…";
-  setStatus("");
-  resultsContainer.classList.add("hidden");
+power.addEventListener("click", async () => {
+  if (busy) return;
+  power.disabled = true;
   try {
-    const response = await searchWebIntent(task);
-    await chrome.runtime.sendMessage({
-      type: "SAVE_SEARCH_RESULTS", query: task, results: response.results,
-    } satisfies ExtMessage).catch(() => {});
-    if (response.results.length > 0) renderResults(response.results, task);
-    else renderNoResults(response.warnings[0] ?? "No results found. Try different keywords.");
+    const response = await chrome.runtime.sendMessage({
+      type: on ? "TOGGLE_OFF" : "ENABLE_SEARCH",
+    } satisfies ExtMessage);
+    if (!response?.ok) throw new Error();
+    on = !on;
+    powerNotice = undefined;
+    if (!on) {
+      contextRequestId = undefined;
+      resultCount = 0;
+      resultsList.replaceChildren();
+      pageNotice = undefined;
+      searchNotice = undefined;
+      retryAfterKey = undefined;
+      mode = "page";
+    }
+    render();
+    if (on && !settingsOpen) task.focus();
   } catch {
-    renderNoResults("Search couldn’t finish. Try again, or open a website and choose Guide this page.");
+    const notice = { message: "Could not change PointWise power. Try again.", error: true };
+    powerNotice = notice;
+    if (contextRequestId) contextNotice = notice;
+    if (settingsOpen) settingsNotice = notice;
+    if (on) taskNotice(mode, notice);
+    else render();
   } finally {
-    searchBtn.textContent = "Search for a site";
+    power.disabled = false;
+  }
+});
+
+pageMode.addEventListener("click", () => selectMode("page"));
+searchMode.addEventListener("click", () => selectMode("search"));
+settings.addEventListener("click", () => settingsOpen ? closeSettings() : openSettings());
+settingsBack.addEventListener("click", closeSettings);
+
+element("task-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  if (!on || busy) return;
+  const taskGoal = task.value.trim();
+  if (!taskGoal) {
+    task.setAttribute("aria-invalid", "true");
+    taskNotice(mode, { message: "Enter what you want to do.", error: true });
+    task.focus();
+    return;
+  }
+  if (mode === "search") {
+    void findWebsites(taskGoal);
+  } else if (!pageSite()) {
+    taskNotice("page", {
+      message: "Open a website first, or find one for this task.",
+      action: { label: "Find a website", run: () => selectMode("search") },
+    });
+  } else {
+    void startGuidance({ type: "TOGGLE_ON", taskGoal }, "page");
+  }
+});
+
+task.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" || event.shiftKey || event.isComposing) return;
+  event.preventDefault();
+  element<HTMLFormElement>("task-form").requestSubmit();
+});
+task.addEventListener("input", () => {
+  task.removeAttribute("aria-invalid");
+  taskNotice(mode);
+});
+
+async function findWebsites(taskGoal: string): Promise<void> {
+  resultCount = 0;
+  resultsList.replaceChildren();
+  taskNotice("search");
+  setBusy(true);
+  try {
+    const response = await searchWebIntent(taskGoal);
+    await chrome.runtime.sendMessage({
+      type: "SAVE_SEARCH_RESULTS", query: taskGoal, results: response.results,
+    } satisfies ExtMessage).catch(() => {});
+    if (response.results.length) renderResults(response.results, taskGoal);
+    else taskNotice("search", { message: response.warnings[0] ?? "No sites found. Try different keywords." });
+  } catch {
+    taskNotice("search", { message: "Search couldn’t finish. Try again.", error: true });
+  } finally {
     setBusy(false);
   }
 }
 
-function renderNoResults(msg: string): void {
-  resultsContainer.innerHTML = `<div class="no-results-card">${escapeHtml(msg)}</div>`;
-  resultsContainer.classList.remove("hidden");
-}
-
-// ── Search results ──────────────────────────────────────────
 function renderResults(items: SearchResultItem[], taskGoal: string): void {
-  resultsContainer.innerHTML = "";
+  resultsList.replaceChildren();
+  resultCount = items.length;
+  element("results-heading").textContent = resultCount === 1 ? "1 website" : `${resultCount} websites`;
 
   for (const item of items) {
-    const card = document.createElement("div");
-    card.className = "result-card";
-
-    // 1. Clickable link (opens site, minimizes popup, activates AI guide)
-    const link = document.createElement("a");
+    const row = document.createElement("li");
+    const link = document.createElement("button");
+    link.type = "button";
     link.className = "result-link";
-    link.href = item.url;
-    link.target = "_blank";
-    link.rel = "noopener noreferrer";
     link.title = item.url;
-    link.innerHTML = `
-      <span class="result-url">${escapeHtml(item.url.replace(/^https?:\/\//, ""))}</span>
-      <span class="ext-icon">↗</span>
-    `;
-    link.onclick = (e) => {
-      e.preventDefault();
-      void startGuidance({ type: "TOGGLE_ON", taskGoal: taskGoal || "Complete my task on this site", targetUrl: item.url });
-    };
-    card.appendChild(link);
+    link.addEventListener("click", () => void startGuidance({
+      type: "TOGGLE_ON", taskGoal: taskGoal || "Complete my task on this site", targetUrl: item.url,
+    }, "search"));
 
-    // 2. Validity score + badge
-    const score = item.validityScore;
-    const badgeText =
-      score >= 70 ? "Strong signals" : score >= 45 ? "Mixed signals" : "Weak signals";
-    const badgeCls = score >= 70 ? "" : score >= 45 ? " warn" : " block";
-    const scoreColor =
-      score >= 70 ? "var(--verified)" : score >= 45 ? "var(--warn)" : "var(--danger)";
-
-    const validityRow = document.createElement("div");
-    validityRow.className = "result-validity";
-    validityRow.innerHTML = `
-      <span class="result-badge${badgeCls}">${badgeText}</span>
-      <div class="score-wrap" title="Estimated site rating">
-        <div class="score-track">
-          <div class="score-fill" style="width:${score}%;background:${scoreColor}"></div>
-        </div>
-        <span class="score-num" style="color:${scoreColor}">${score}%</span>
-      </div>
-    `;
-    card.appendChild(validityRow);
-
-    const reason = document.createElement("p");
-    reason.className = "result-reason";
-    const checks = [
-      ["Live HTTPS", "Site responded over HTTPS."],
-      ["DNS", "Domain resolved."],
-      ["TLS / CT", "Certificate check passed."],
+    const verification = item.warnings?.[0] ??
+      (item.validityScore >= 70 ? "Strong verification signals"
+        : item.validityScore >= 45 ? "Mixed verification signals" : "Limited verification signals");
+    const details = [
+      ["result-name", item.title || item.domain || item.url],
+      ["result-domain", item.title !== item.domain ? item.domain : ""],
+      ["result-description", item.snippet?.trim() ||
+        (item.matchedKeywords?.length ? `Matches ${item.matchedKeywords.slice(0, 3).join(", ")}.` : "")],
+      ["result-meta", `Relevance ${item.keywordScore}% · ${verification}`],
     ];
-    const passedChecks = checks
-      .filter(([name]) => item.signals?.some((signal) => signal.name === name && signal.passed))
-      .map(([, label]) => label);
-    const warning = item.warnings?.[0];
-    reason.textContent = [warning, ...passedChecks.slice(0, 2)]
-      .filter(Boolean).join(" ") || "Few verification signals were available.";
-    card.appendChild(reason);
-
-    resultsContainer.appendChild(card);
+    for (const [className, value] of details) {
+      if (!className || !value) continue;
+      const line = document.createElement("span");
+      line.className = className;
+      line.textContent = value;
+      link.append(line);
+    }
+    row.append(link);
+    resultsList.append(row);
   }
-
-  resultsContainer.classList.remove("hidden");
 }
 
-async function startGuidance(message: Extract<ExtMessage, { type: "TOGGLE_ON" | "RESCAN" }>): Promise<void> {
-  if (!isOn || busy || powerChanging) return;
+async function startGuidance(message: StartMessage, origin: Mode): Promise<void> {
+  if (!on || busy) return;
   setBusy(true);
   try {
     if (!(await getStoredApiKey())) {
-      setStatus("Add a Gemini API key to start guidance.");
-      openKeySettings();
+      taskNotice(origin, {
+        message: "Add a Gemini API key to start guidance.",
+        action: { label: "Open settings", run: openSettings },
+      });
       return;
     }
     const response = await chrome.runtime.sendMessage(message);
     if (response?.ok) window.close();
-    else setStatus(response?.error ?? "The page changed. Choose Guide this page to start again.");
-  } catch {
-    setStatus("Could not start guidance. Try again.");
+    else throw new Error(response?.error ?? "The page changed. Start guidance again.");
+  } catch (error) {
+    taskNotice(origin, {
+      message: error instanceof Error && error.message ? error.message : "Could not start guidance.",
+      error: true,
+      action: { label: "Try again", run: () => void startGuidance(message, origin) },
+    });
   } finally {
     setBusy(false);
   }
 }
 
-function openKeySettings(): void {
-  keyRow.classList.remove("hidden");
-  apiKeyInput.focus();
-}
-
-// ── API key settings ──────────────────────────────────────────
-keyBtn.addEventListener("click", () => keyRow.classList.toggle("hidden"));
-
-saveKeyBtn.addEventListener("click", async () => {
-  const key = apiKeyInput.value.trim();
-  try {
-    if (!key) {
-      await chrome.storage.local.remove("gc_api_key");
-    } else {
-      await chrome.storage.local.set({ gc_api_key: key });
-    }
-    keyRow.classList.add("hidden");
-    setStatus(key ? "API key saved. You can start or retry guidance." : "API key removed.");
-  } catch {
-    setStatus("Could not save the API key change. Try again.");
-  }
+contextPanel.addEventListener("submit", (event) => {
+  event.preventDefault();
+  void submitContext(false);
+});
+element("context-skip").addEventListener("click", () => void submitContext(true));
+contextAnswer.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" || event.shiftKey || event.isComposing) return;
+  event.preventDefault();
+  contextPanel.requestSubmit();
 });
 
-function escapeHtml(s: string): string {
-  return s
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
+async function submitContext(skip: boolean): Promise<void> {
+  if (!contextRequestId || busy) return;
+  const answer = skip ? "" : contextAnswer.value.trim();
+  if (!skip && !answer) {
+    contextAnswer.setAttribute("aria-invalid", "true");
+    contextAnswer.focus();
+    return;
+  }
+  contextAnswer.removeAttribute("aria-invalid");
+  setBusy(true);
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: "CONTEXT_SUBMITTED", answer, requestId: contextRequestId,
+    } satisfies ExtMessage);
+    if (response?.ok) window.close();
+    else if (response?.skipped) {
+      contextRequestId = undefined;
+      pageNotice = { message: "The page changed. Start guidance again." };
+    } else throw new Error();
+  } catch {
+    contextNotice = { message: "Could not send your answer. Try again.", error: true };
+  } finally {
+    setBusy(false);
+  }
 }
+
+element("key-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const value = key.value.trim();
+  try {
+    if (value) await chrome.storage.local.set({ gc_api_key: value });
+    else await chrome.storage.local.remove("gc_api_key");
+    settingsNotice = { message: value ? "API key saved." : "API key removed." };
+    if (value) {
+      if (pageNotice?.action?.run === openSettings) pageNotice = undefined;
+      if (searchNotice?.action?.run === openSettings) searchNotice = undefined;
+      if (retryAfterKey) {
+        const message = retryAfterKey;
+        retryAfterKey = undefined;
+        pageNotice = { message: "API key updated.", action: {
+          label: "Try again", run: () => void startGuidance(message, "page"),
+        } };
+      }
+    }
+  } catch {
+    settingsNotice = { message: "Could not save the API key. Try again.", error: true };
+  }
+  render();
+});
+
+power.disabled = true;
+void initialize().catch(() => {
+  powerNotice = { message: "Could not load PointWise. Reopen the popup to try again.", error: true };
+}).finally(() => {
+  power.disabled = false;
+  render();
+  if (contextRequestId) contextAnswer.focus();
+});
