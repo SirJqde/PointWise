@@ -7,35 +7,46 @@
   <script type="module" crossorigin src="/assets/modulepreload-polyfill-B5Qt9EMX.js"></script>
   <script type="module" crossorigin src="/assets/ai-planner-BozH5HlU.js"></script>
   <script type="module" crossorigin src="/assets/session-graph-k4RBgznn.js"></script>
-  <script type="module" crossorigin src="/assets/popup-ChTRf6Av.js"></script>
-  <link rel="stylesheet" crossorigin href="/assets/popup-6wDYJs8C.css">
+  <script type="module" crossorigin src="/assets/popup-DkBPs5q_.js"></script>
+  <link rel="stylesheet" crossorigin href="/assets/popup-S0oRZ8x-.css">
 </head>
 <body>
   <header class="header">
-    <h1>PointWise</h1>
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <h1>PointWise</h1>
+    </div>
     <div class="header-actions">
-      <button id="settings-btn" class="text-button" type="button" aria-controls="settings-panel" aria-expanded="false">Settings</button>
+      <button id="settings-btn" class="settings-trigger" type="button" aria-controls="settings-panel" aria-expanded="false">Settings</button>
       <button id="power-switch" class="switch" type="button" role="switch" aria-checked="false" aria-label="PointWise"></button>
     </div>
   </header>
   <main>
-    <p id="off-panel" class="muted">Turn on PointWise to get guidance on a page.</p>
+    <section id="off-panel" class="off-panel">
+      <h2>PointWise is off</h2>
+      <p class="muted">Turn it on to get guidance on the page you’re visiting.</p>
+    </section>
 
     <section id="task-panel" hidden>
       <div class="modes" role="group" aria-label="How to start">
         <button id="page-mode" type="button" aria-pressed="true">Current page</button>
         <button id="search-mode" type="button" aria-pressed="false">Find a website</button>
       </div>
-      <p id="page-context" class="muted page-context"></p>
       <form id="task-form" class="task-form">
-        <label for="task-input">What do you want to do?</label>
-        <textarea id="task-input" rows="2" placeholder="Find the search box and look up Bengaluru"></textarea>
-        <button id="start-btn" class="primary-button" type="submit">Guide this page</button>
+        <label class="task-heading" for="task-input">What can I help you do?</label>
+        <p id="page-context" class="page-context"></p>
+        <div class="composer">
+          <textarea id="task-input" rows="3" placeholder="Describe what you want to do" aria-describedby="page-context"></textarea>
+          <div class="composer-footer">
+            <span class="keyboard-hint" aria-hidden="true"><kbd>Enter</kbd> to start</span>
+            <button id="start-btn" class="primary-button" type="submit">Guide this page</button>
+          </div>
+        </div>
       </form>
     </section>
 
     <form id="context-panel" class="panel-form" hidden>
-      <label id="context-question" for="context-answer"></label>
+      <label id="context-question" class="task-heading" for="context-answer"></label>
       <textarea id="context-answer" rows="2" placeholder="Add a little more detail"></textarea>
       <div class="button-row">
         <button id="context-submit" class="primary-button" type="submit">Continue</button>
