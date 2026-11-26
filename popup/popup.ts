@@ -71,8 +71,10 @@ function render(): void {
 
   const site = pageSite();
   element("page-context").textContent = mode === "search"
-    ? "Find a site for your task."
-    : site ? `On ${site}` : "Open a website in this tab to use current-page guidance.";
+    ? "Search the web for a site that fits your task."
+    : site ? `Guiding on ${site}` : "Open a website in this tab to start guidance.";
+  task.placeholder = mode === "search" ? "e.g. Find the official site to renew my licence"
+    : "e.g. Find the search box and look up Bengaluru";
   start.textContent = busy
     ? mode === "search" ? "Searching…" : "Starting…"
     : mode === "search" ? "Find websites" : "Guide this page";
@@ -264,7 +266,8 @@ function renderResults(items: SearchResultItem[], taskGoal: string): void {
       ["result-domain", item.title !== item.domain ? item.domain : ""],
       ["result-description", item.snippet?.trim() ||
         (item.matchedKeywords?.length ? `Matches ${item.matchedKeywords.slice(0, 3).join(", ")}.` : "")],
-      ["result-meta", `Relevance ${item.keywordScore}% · ${verification}`],
+      ["result-relevance", `${item.keywordScore}% relevance`],
+      ["result-verification", verification],
     ];
     for (const [className, value] of details) {
       if (!className || !value) continue;
